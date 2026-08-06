@@ -8,15 +8,13 @@ SwarmLink 安全层 v0.3 — PyNaCl 加速版
   DH (X25519) → HKDF-SHA256 → session_key (32B)
   → per-packet sub_key → ChaCha20-Poly1305 AEAD
 
-兼容:
-  - 优先 PyNaCl (C 加速)
-  - 不可用时自动降级到纯 Python (security.py)
-  - 接口与 security.py 一致, 上层无感
+依赖:
+  PyNaCl 为硬依赖 (X25519 + AEAD 均来自 libsodium C)。
+  pip install pynacl
 
 性能参考:
   | 实现          | 加密吞吐    | 解密吞吐    |
   |---------------|-------------|-------------|
-  | 纯 Python    | ~5 MB/s    | ~5 MB/s    |
   | PyNaCl (C)   | ~500 MB/s  | ~500 MB/s  |
   | 纯 C/Rust    | ~2000 MB/s | ~2000 MB/s |
 """
@@ -63,18 +61,8 @@ except ImportError:
         FLAG_ENCRYPTED, FLAG_RELIABLE, flags_for,
     )
 
-# 降级导入
-if not _HAS_NACL:
-    from .security import (
-        KeyPair as _KeyPairPure,
-        Encryptor as _EncryptorPure,
-        Decryptor as _DecryptorPure,
-        SessionManager as _SessionManagerPure,
-        SecurePacketBuilder as _SecurePacketBuilderPure,
-    )
-
 # ============================================================
-# 常量 (与 security.py 协议兼容)
+# 常量 (协议兼容)
 # ============================================================
 NONCE_SIZE = 8
 TAG_SIZE = 16

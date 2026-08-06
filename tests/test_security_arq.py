@@ -28,7 +28,7 @@ from protocol.arq_full import (
     PacketStore, ARQAggregatorV2, LossDetector,
     GroundReceiver, SkySender,
 )
-from protocol.security import (
+from protocol.security_nacl import (
     KeyPair, Encryptor, Decryptor, SessionManager,
     SecurePacketBuilder, derive_sub_key,
     SECURITY_HEADER_SIZE, NONCE_SIZE, TAG_SIZE,

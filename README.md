@@ -21,8 +21,8 @@
 | 篡改检测 | AEAD 内置 MAC | RFC 7539 |
 
 > ⚠️ 诚实声明：
-> - **`security_nacl.py`（推荐）**：PyNaCl / libsodium 真 AEAD（ChaCha20-Poly1305 IETF 构造）
-> - **`security.py`（纯 Python 备用）**：ChaCha20 加密 + **HMAC-SHA256 替代 Poly1305**（自定义构造，非 RFC 7539 标准 AEAD，仅用于无 C 依赖的 PoC）
+> - 安全层统一由 **`security_nacl.py`** 提供：PyNaCl / libsodium 真 AEAD（ChaCha20-Poly1305 IETF 构造），PyNaCl 为硬依赖
+> - v0.2 的纯 Python 备用实现 `security.py`（HMAC-SHA256 替代 Poly1305，非标准 AEAD）已在 v0.3 删除，避免误用
 > - 非真军用：无 HSM/SE/TEE，无国密 SM 系列。适用于消防、边防、电力巡检等高安全需求场景。
 
 ### 📡 ARQ 完整重传链路
@@ -41,19 +41,16 @@
 
 ```bash
 # 安装依赖
-pip install pynacl pytest
+pip install pynacl pytest numpy
 
-# 运行全部测试 (40 项)
+# 运行全部测试 (45 项)
 python3 -m pytest tests/ -q
+
+# 运行 v0.3 真实 UDP 三档弱网联调 (正常/15%/40%+断连/多流复用)
+python3 examples/udp_e2e_test.py
 
 # 运行 v0.2 核心功能验证
 python3 tests/test_v02_core.py
-
-# 运行端到端 Demo (30% 丢包 + 断连)
-python3 examples/sky_to_ground.py --loss 0.30 --blackout-prob 0.005
-
-# 运行 v0.3 真实 UDP 三档弱网联调 (正常/15%/40%+断连)
-python3 examples/udp_e2e_test.py
 ```
 
 ---
@@ -68,16 +65,15 @@ swarmlink/
 │   ├── rs_codec.py      # Reed-Solomon(10,14) GF(256)
 │   ├── arq.py          # ARQ 聚合器 A 方案 + ClientBitmap B 方案
 │   ├── arq_full.py     # ARQ 完整链路 (SkySender/GroundReceiver/LossDetector)
-│   ├── security_nacl.py # 🆕 v0.3 安全层 (PyNaCl 真 AEAD, 推荐)
-│   └── security.py     # v0.2 安全层 (纯 Python 备用, Poly1305 以 HMAC 替代)
+│   ├── security_nacl.py # 🆕 v0.3 安全层 (PyNaCl 真 AEAD, 硬依赖)
 ├── tests/              # 40 项测试, pytest 全绿
 │   ├── test_protocol.py      # v0.1 单元测试
 │   ├── weaknet.py           # 弱网模拟器 + 性能度量
 │   ├── test_v02_core.py     # v0.2 核心验证
 │   └── test_security_arq.py
 ├── examples/
-│   ├── sky_to_ground.py    # 端到端 Demo (30% 丢包 + 断连)
-│   └── udp_e2e_test.py    # 🆕 v0.3 真实 UDP 三档弱网联调
+│   ├── udp_e2e_test.py    # ✅ 主线联调: 真实 UDP 三档弱网 + 多流复用
+│   └── sky_to_ground.py   # (legacy) 进程内模拟 demo, 用旧 ARQ 路径
 ├── docs/
 │   ├── VISION.md
 │   ├── ARCHITECTURE.md

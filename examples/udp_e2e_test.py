@@ -45,6 +45,9 @@ from protocol.fragment import Fragmenter, Reassembler
 from protocol.arq_full import (
     PacketStore, GroundReceiver, SkySender,
 )
+from protocol.multiplex import (
+    StreamMultiplexer, StreamType,
+)
 from protocol.security_nacl import (
     create_session_manager, get_backend_info, SECURITY_HEADER_SIZE,
 )
@@ -185,12 +188,14 @@ def run_scenario(cfg: dict, run_idx: int = 0,
                  n_frames: int = N_FRAMES,
                  n_clients: int = N_CLIENTS,
                  encrypted: bool = True,
+                 use_multiplex: bool = False,
                  verbose: bool = True) -> dict:
     name = cfg["name"]
     if verbose:
         print(f"\n{'─' * 62}")
         print(f"  场景: {name}   客户端: {n_clients}   加密: "
-              f"{'开' if encrypted else '关'}")
+              f"{'开' if encrypted else '关'}"
+              f"   复用: {'开' if use_multiplex else '关'}")
         print(f"  丢包率: {cfg['loss_rate']*100:.0f}%  "
               f"延迟: {cfg['delay_ms']}ms  抖动: {cfg['jitter_ms']}ms", end="")
         if cfg.get("blackout_prob", 0) > 0:
@@ -235,11 +240,27 @@ def run_scenario(cfg: dict, run_idx: int = 0,
     fragger = Fragmenter(SESSION_TAG, chunk_size=CHUNK_SIZE,
                          fec_k=FEC_K, fec_n=FEC_N)
     store = PacketStore(max_frames=120, ttl_sec=6.0)
+
+    mux = None
+    ctrl_msgs_sent = []
+    if use_multiplex:
+        # 统一出口: 复用器调度 (视频 + 控制 + 遥测 一条链路)
+        mux = StreamMultiplexer(SESSION_TAG, sky_link.send,
+                                chunk_size=CHUNK_SIZE, fec_k=FEC_K, fec_n=FEC_N)
+
+        def sky_send_via_mux(pkt, recipients=None):
+            # 广播给所有地面端 (mux 统一调度); 视频流不区分接收者
+            mux.submit_packet(StreamType.VIDEO, pkt)
+
+        sky_send = sky_send_via_mux
+    else:
+        sky_send = sky_link.send
+
     sender = SkySender(
         session_tag=SESSION_TAG,
         fragmenter=fragger,
         encrypt_func=(sky_sm.encrypt_payload if encrypted else None),
-        send_callback=sky_link.send,
+        send_callback=sky_send,
         chunk_size=CHUNK_SIZE, fec_k=FEC_K, fec_n=FEC_N,
         packet_store=store,
         arq_window_ms=20,
@@ -249,6 +270,7 @@ def run_scenario(cfg: dict, run_idx: int = 0,
     send_times: dict = {}
     completed = [dict() for _ in range(n_clients)]
     latencies = [dict() for _ in range(n_clients)]
+    ctrl_recv = [dict() for _ in range(n_clients)]  # stream_id=1 控制消息
 
     def make_cb(cid):
         def cb(client_id, frame_id, data):
@@ -257,6 +279,10 @@ def run_scenario(cfg: dict, run_idx: int = 0,
                 latencies[cid][frame_id] = (time.monotonic()
                                             - send_times[frame_id]) * 1000
         return cb
+
+    # 控制流重组器 (独立于视频流, frame_id 空间隔离)
+    ctrl_reasms = [Reassembler(SESSION_TAG, fec_k=FEC_K, fec_n=FEC_N)
+                   for _ in range(n_clients)]
 
     receivers = []
     for i in range(n_clients):
@@ -278,21 +304,48 @@ def run_scenario(cfg: dict, run_idx: int = 0,
                 for fid in range(n_frames)}
     original_bytes = sum(len(v) for v in original.values())
 
+    # --- 控制消息 (multiplex 场景: 与控制流同链路) ---
+    ctrl_msgs = []
+    ctrl_msgs_expected = []
+    if use_multiplex:
+        ctrl_msgs = [
+            b"ARM_MOTORS",
+            b"SET_ALTITUDE:50m",
+            b"RTL_NOW",
+            b"GIMBAL_PITCH:-15",
+        ]
+        ctrl_msgs_expected = list(ctrl_msgs)
+
     # --- 发送 (按 30fps 节奏, 别一次灌爆) ---
     t0 = time.monotonic()
     for fid in range(n_frames):
         send_times[fid] = time.monotonic()
         sender.send_frame(original[fid], frame_id=fid,
                           stream_id=0, key_frame=(fid % 10 == 0))
+        if mux is not None and ctrl_msgs:
+            # 控制消息插在视频流之间 (WFQ 保证优先出队)
+            msg = ctrl_msgs.pop(0)
+            mux.submit(StreamType.CONTROL, msg)
         time.sleep(0.008)
 
     # --- 主循环 ---
     max_wait = 12.0
     last_report = 0.0
     while time.monotonic() - t0 < max_wait:
-        # 1) 地面端收数据
+        # 1) 地面端收数据 (multiplex: 按 stream_id 分流)
         for i in range(n_clients):
             for pkt in gnd_links[i].drain():
+                if use_multiplex:
+                    try:
+                        hdr = unpack_header(pkt)
+                    except HeaderError:
+                        continue
+                    if hdr.stream_id == StreamType.CONTROL:
+                        # 控制消息 (明文, mux 直发): 独立重组器
+                        frame = ctrl_reasms[i].feed(pkt)
+                        if frame is not None:
+                            ctrl_recv[i][len(ctrl_recv[i])] = frame
+                        continue
                 receivers[i].feed(pkt)
 
         # 2) 天空端收 ARQ_REQ (client_id 来自 REQ payload)
@@ -331,8 +384,22 @@ def run_scenario(cfg: dict, run_idx: int = 0,
     time.sleep(0.15)
     for i in range(n_clients):
         for pkt in gnd_links[i].drain():
+            if use_multiplex:
+                try:
+                    hdr = unpack_header(pkt)
+                except HeaderError:
+                    continue
+                if hdr.stream_id == StreamType.CONTROL:
+                    frame = ctrl_reasms[i].feed(pkt)
+                    if frame is not None:
+                        ctrl_recv[i][len(ctrl_recv[i])] = frame
+                    continue
             receivers[i].feed(pkt)
     elapsed = time.monotonic() - t0
+
+    if mux is not None:
+        time.sleep(0.1)
+        mux.shutdown()
 
     # --- 验证 (重组帧尾部含 FEC 补零, 用前缀比对) ---
     verified = [0] * n_clients
@@ -410,6 +477,15 @@ def run_scenario(cfg: dict, run_idx: int = 0,
         "wire_bytes": sky_link.bytes_on_wire,
     }
 
+    # 控制消息统计 (multiplex 场景)
+    if use_multiplex:
+        ctrl_expected = len(ctrl_msgs_expected) if ctrl_msgs_expected else 0
+        result["ctrl_sent"] = ctrl_expected
+        result["ctrl_recv"] = sum(len(c) for c in ctrl_recv)
+        if verbose:
+            print(f"      控制消息: 发送 {ctrl_expected}  "
+                  f"各端收到 {[len(c) for c in ctrl_recv]}")
+
     if verbose:
         print(f"\n    结果 (耗时 {result['time_sec']}s):")
         print(f"      帧完成:     {total_complete}/{denom} "
@@ -466,6 +542,13 @@ def main():
     print(f"{'═' * 62}")
     plain = run_scenario(dict(SCENARIOS[1]), run_idx=10, encrypted=False)
 
+    # 多流复用对照组: 视频 + 控制 + 遥测同链路 (15% 丢包)
+    print(f"\n{'═' * 62}")
+    print("  对照组: 多流复用 (StreamMultiplexer 统一调度)")
+    print(f"{'═' * 62}")
+    mux_r = run_scenario(dict(SCENARIOS[1]), run_idx=11,
+                         use_multiplex=True)
+
     # ---- 汇总 ----
     print(f"\n\n{'═' * 78}")
     print("  SwarmLink v0.3 三档弱网对比")
@@ -493,13 +576,24 @@ def main():
           f"{plain['retransmits']:>7d}"
           f"{plain['arq_merge_rate']:>7.1f}%"
           f"{plain['overhead_x']:>7.2f}x")
+    print(f"  {'标准档(多流复用)':<22s}"
+          f"{mux_r['completion_rate']:>7.1f}%"
+          f"{mux_r['verify_rate']:>7.1f}%"
+          f"{mux_r['down_loss_pct']:>8.1f}%"
+          f"{mux_r['p50_ms']:>6.0f}ms"
+          f"{mux_r['p95_ms']:>7.0f}ms"
+          f"{mux_r['retransmits']:>7d}"
+          f"{mux_r['arq_merge_rate']:>7.1f}%"
+          f"{mux_r['overhead_x']:>7.2f}x")
 
     # ---- 判定 ----
     ok_normal = results[0]["verify_rate"] == 100.0
     ok_std = results[1]["verify_rate"] >= 80.0
     ok_hell = results[2]["verify_rate"] >= 30.0
     no_corrupt = all(r["corrupted"] == 0 for r in results)
-    all_pass = ok_normal and ok_std and ok_hell and no_corrupt
+    mux_ok = (mux_r["verify_rate"] >= 80.0
+              and mux_r.get("ctrl_recv", 0) > 0)
+    all_pass = ok_normal and ok_std and ok_hell and no_corrupt and mux_ok
 
     print(f"\n{'═' * 78}")
     for r, thr in zip(results, [100.0, 80.0, 30.0]):

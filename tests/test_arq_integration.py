@@ -26,7 +26,7 @@ from protocol.arq_full import (
     PacketStore, ARQAggregatorV2, LossDetector,
     GroundReceiver, SkySender,
 )
-from protocol.security import (
+from protocol.security_nacl import (
     KeyPair, SessionManager, SecurePacketBuilder,
     SECURITY_HEADER_SIZE,
 )
@@ -418,7 +418,7 @@ def test_security_properties():
 # ============================================================
 def test_performance_benchmark():
     print("\n--- Test 5: 性能基准 ---")
-    from protocol.security import benchmark_throughput
+    from protocol.security_nacl import benchmark_throughput
 
     benchmark_throughput(800, 300)
     benchmark_throughput(1400, 300)

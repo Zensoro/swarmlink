@@ -187,6 +187,27 @@ class StreamMultiplexer:
 
         return len(fragments)
 
+    def submit_packet(self, stream_id: int, packet: bytes) -> bool:
+        """
+        提交一个已打头的包 (跳过分片, 由上层管线生成, 如 SkySender)。
+        供复用器作为统一出口调度发送。失败返回 False。
+        """
+        if stream_id not in self._queues:
+            return False
+
+        config = STREAM_CONFIG[StreamType(stream_id)]
+        with self._lock:
+            queue = self._queues[stream_id]
+            if len(queue) >= config["max_queue"]:
+                if stream_id == StreamType.VIDEO:
+                    # 队列满丢旧帧 (FIFO), 保证新包能进
+                    self._drop_old_frames(stream_id, 1)
+                else:
+                    self._stats[stream_id]["dropped"] += 1
+                    return False
+            queue.append(packet)
+        return True
+
     def _fragment(self, stream_id: int, data: bytes,
                   key_frame: bool, use_fec: bool) -> List[bytes]:
         """分片 + 打头"""
@@ -203,31 +224,40 @@ class StreamMultiplexer:
         if reliable:
             flags |= FLAG_RELIABLE
 
-        # 分片
+        # 分片 (对齐到 chunk_size, 重组端按 frame_len 裁剪补零)
         cs = self.chunk_size
         raw_chunks = []
         for i in range(0, len(data), cs):
-            raw_chunks.append(data[i:i+cs])
+            c = data[i:i+cs]
+            if len(c) < cs:
+                c = c + b'\x00' * (cs - len(c))
+            raw_chunks.append(c)
+
+        # FEC 模式: 单帧 ≤ fec_k 片 (超出截断, PoC 限制, 与 fragment.py 一致)
+        if use_fec and len(raw_chunks) > self.fec_k:
+            raw_chunks = raw_chunks[:self.fec_k]
 
         total = len(raw_chunks)
 
-        # FEC 冗余
+        # FEC 冗余 (补满 fec_k 片才可编码; 超过 fec_k 片截断, 单帧 ≤ fec_k*cs)
+        # 注意: 补零的数据片也要发出去 (与 fragment.py 一致),
+        # 否则重组端凑不齐 fec_k 片, FEC 永远无法触发。
         fec_chunks = []
         if use_fec and total > 0:
             try:
                 from .rs_codec import ReedSolomon
                 rs = ReedSolomon()
-                # 补零对齐
-                aligned = list(raw_chunks)
-                while len(aligned) < self.fec_k:
-                    aligned.append(b'\x00' * cs)
-                encoded = rs.encode(aligned[:self.fec_k])
+                data_for_fec = raw_chunks[:self.fec_k]
+                while len(data_for_fec) < self.fec_k:
+                    data_for_fec.append(b'\x00' * cs)
+                encoded = rs.encode(data_for_fec)
+                raw_chunks = encoded[:self.fec_k]      # 补零后的数据片全发
                 fec_chunks = encoded[self.fec_k:self.fec_n]
                 total = self.fec_n
             except Exception:
                 pass
 
-        # 打头
+        # 打头 (frame_len 携带原始帧真实长度, 重组端裁剪补零)
         packets = []
         all_chunks = raw_chunks + fec_chunks
         for idx, chunk in enumerate(all_chunks):
@@ -241,6 +271,7 @@ class StreamMultiplexer:
                 frame_id=fid, frag_id=idx,
                 total_frags=total, flags=f,
                 stream_id=stream_id,
+                frame_len=len(data),
             )
             packets.append(hdr + chunk)
 
