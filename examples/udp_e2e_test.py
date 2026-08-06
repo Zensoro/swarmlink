@@ -46,7 +46,7 @@ from protocol.arq_full import (
     PacketStore, GroundReceiver, SkySender,
 )
 from protocol.multiplex import (
-    StreamMultiplexer, StreamType,
+    StreamMultiplexer, StreamType, ReliableChannel,
 )
 from protocol.security_nacl import (
     create_session_manager, get_backend_info, SECURITY_HEADER_SIZE,
@@ -270,7 +270,9 @@ def run_scenario(cfg: dict, run_idx: int = 0,
     send_times: dict = {}
     completed = [dict() for _ in range(n_clients)]
     latencies = [dict() for _ in range(n_clients)]
-    ctrl_recv = [dict() for _ in range(n_clients)]  # stream_id=1 控制消息
+    ctrl_recv = [[] for _ in range(n_clients)]  # stream_id=1 控制消息
+    ctrl_sender = None
+    ctrl_receivers = []
 
     def make_cb(cid):
         def cb(client_id, frame_id, data):
@@ -279,10 +281,6 @@ def run_scenario(cfg: dict, run_idx: int = 0,
                 latencies[cid][frame_id] = (time.monotonic()
                                             - send_times[frame_id]) * 1000
         return cb
-
-    # 控制流重组器 (独立于视频流, frame_id 空间隔离)
-    ctrl_reasms = [Reassembler(SESSION_TAG, fec_k=FEC_K, fec_n=FEC_N)
-                   for _ in range(n_clients)]
 
     receivers = []
     for i in range(n_clients):
@@ -304,9 +302,11 @@ def run_scenario(cfg: dict, run_idx: int = 0,
                 for fid in range(n_frames)}
     original_bytes = sum(len(v) for v in original.values())
 
-    # --- 控制消息 (multiplex 场景: 与控制流同链路) ---
+    # --- 控制消息 (multiplex 场景: 走可靠通道, 与控制流同链路) ---
     ctrl_msgs = []
     ctrl_msgs_expected = []
+    ctrl_sender = None
+    ctrl_receivers = []
     if use_multiplex:
         ctrl_msgs = [
             b"ARM_MOTORS",
@@ -316,16 +316,36 @@ def run_scenario(cfg: dict, run_idx: int = 0,
         ]
         ctrl_msgs_expected = list(ctrl_msgs)
 
+        # 天空端可靠控制通道 (加密 + ARQ 重传)
+        ctrl_sender = ReliableChannel(
+            SESSION_TAG, StreamType.CONTROL,
+            encrypt_func=(sky_sm.encrypt_payload if encrypted else None),
+            client_id=0, rto_ms=40, max_retries=10,
+        )
+        ctrl_sender.set_retransmit_func(
+            lambda pkt: mux.submit_packet(StreamType.CONTROL, pkt))
+
+        # 每个地面端一条可靠接收通道
+        for i in range(n_clients):
+            ctrl_recv_chan = ReliableChannel(
+                SESSION_TAG, StreamType.CONTROL,
+                decryptor_func=gnd_sms[i].decrypt_payload,
+                client_id=i, rto_ms=40, max_retries=10,
+                on_message=lambda msg, cid=i: ctrl_recv[cid].append(msg),
+                send_arq_func=gnd_links[i].send,
+            )
+            ctrl_receivers.append(ctrl_recv_chan)
+
     # --- 发送 (按 30fps 节奏, 别一次灌爆) ---
     t0 = time.monotonic()
     for fid in range(n_frames):
         send_times[fid] = time.monotonic()
         sender.send_frame(original[fid], frame_id=fid,
                           stream_id=0, key_frame=(fid % 10 == 0))
-        if mux is not None and ctrl_msgs:
-            # 控制消息插在视频流之间 (WFQ 保证优先出队)
+        if ctrl_sender is not None and ctrl_msgs:
+            # 控制消息走可靠通道 (WFQ 保证优先出队)
             msg = ctrl_msgs.pop(0)
-            mux.submit(StreamType.CONTROL, msg)
+            ctrl_sender.send_message(msg)
         time.sleep(0.008)
 
     # --- 主循环 ---
@@ -341,14 +361,12 @@ def run_scenario(cfg: dict, run_idx: int = 0,
                     except HeaderError:
                         continue
                     if hdr.stream_id == StreamType.CONTROL:
-                        # 控制消息 (明文, mux 直发): 独立重组器
-                        frame = ctrl_reasms[i].feed(pkt)
-                        if frame is not None:
-                            ctrl_recv[i][len(ctrl_recv[i])] = frame
+                        # 控制消息: 可靠通道 (解密 + 滑窗 + 去重)
+                        ctrl_receivers[i].feed(pkt)
                         continue
                 receivers[i].feed(pkt)
 
-        # 2) 天空端收 ARQ_REQ (client_id 来自 REQ payload)
+        # 2) 天空端收 ARQ_REQ (client_id 来自 REQ payload, 按 stream_id 路由)
         for pkt in sky_link.drain():
             try:
                 hdr = unpack_header(pkt)
@@ -359,17 +377,29 @@ def run_scenario(cfg: dict, run_idx: int = 0,
             cid = 0
             if len(pkt) >= HEADER_SIZE + 4:
                 cid = struct.unpack("!I", pkt[HEADER_SIZE:HEADER_SIZE + 4])[0]
-            sender.handle_arq_request(pkt, client_id=cid)
+            if hdr.stream_id == StreamType.CONTROL and ctrl_sender is not None:
+                ctrl_sender.handle_arq_request(pkt, client_id=cid)
+            else:
+                sender.handle_arq_request(pkt, client_id=cid)
 
         # 3) 按合并窗口刷新 ARQ (关键: 不是无条件 flush)
         sender.tick_arq()
+        if ctrl_sender is not None:
+            ctrl_sender.tick_arq()
 
         # 4) 地面端丢失检测
         for r in receivers:
             r.tick_loss_check()
+        for cr in ctrl_receivers:
+            cr.tick_loss_check()
 
-        # 5) 完成判定
-        if all(len(c) >= n_frames for c in completed):
+        # 5) 完成判定 (视频 + 控制消息都收齐)
+        video_done = all(len(c) >= n_frames for c in completed)
+        ctrl_done = True
+        if ctrl_sender is not None:
+            ctrl_done = all(len(c) >= len(ctrl_msgs_expected)
+                            for c in ctrl_recv)
+        if video_done and ctrl_done:
             break
 
         elapsed = time.monotonic() - t0
@@ -381,6 +411,8 @@ def run_scenario(cfg: dict, run_idx: int = 0,
         time.sleep(0.001)
 
     sender.flush_arq()
+    if ctrl_sender is not None:
+        ctrl_sender.flush_arq()
     time.sleep(0.15)
     for i in range(n_clients):
         for pkt in gnd_links[i].drain():
@@ -390,11 +422,22 @@ def run_scenario(cfg: dict, run_idx: int = 0,
                 except HeaderError:
                     continue
                 if hdr.stream_id == StreamType.CONTROL:
-                    frame = ctrl_reasms[i].feed(pkt)
-                    if frame is not None:
-                        ctrl_recv[i][len(ctrl_recv[i])] = frame
+                    ctrl_receivers[i].feed(pkt)
                     continue
             receivers[i].feed(pkt)
+    time.sleep(0.3)
+    for i in range(n_clients):
+        for pkt in gnd_links[i].drain():
+            if use_multiplex:
+                try:
+                    hdr = unpack_header(pkt)
+                except HeaderError:
+                    continue
+                if hdr.stream_id == StreamType.CONTROL:
+                    ctrl_receivers[i].feed(pkt)
+                    continue
+            receivers[i].feed(pkt)
+        ctrl_receivers[i].tick_loss_check() if ctrl_receivers else None
     elapsed = time.monotonic() - t0
 
     if mux is not None:

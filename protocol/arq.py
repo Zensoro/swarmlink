@@ -128,10 +128,11 @@ class ARQClient:
     监听 Reassembler 的缺失，发 ARQ_REQ 给天空端。
     """
     def __init__(self, session_tag: int, client_id: int,
-                 send_callback=None):
+                 send_callback=None, stream_id: int = 0):
         self.session_tag = session_tag
         self.client_id = client_id
         self._send = send_callback
+        self._stream_id = stream_id
         # 已请求过但尚未收到回复的，避免重复请求
         self._inflight: set = set()
 
@@ -154,7 +155,7 @@ class ARQClient:
             frag_id=frag_id,
             total_frags=1,
             flags=FLAG_ARQ_REQ,
-            stream_id=0,
+            stream_id=self._stream_id,
         )
         # payload 携带 client_id（让天空端知道谁在要）
         payload = struct.pack("!I", self.client_id)

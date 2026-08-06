@@ -30,6 +30,7 @@
 - **B 方案（预留）**：ClientBitmap 精确记录谁缺啥 → 只发给缺的人
 - **LossDetector**：指数退避检测缺失分片，防止 ARQ 风暴
 - **PacketStore**：带 TTL 的滑动窗口存储，防内存爆
+- **ReliableChannel（控制/遥测流）**：单包 + 滑窗空洞检测 + 静默探测 + ARQ 重传，15% 丢包下实测 4/4 必达
 
 ### 🔄 FEC 纠错
 - Reed-Solomon(10,14)：丢 4 片以内当场恢复
@@ -43,7 +44,7 @@
 # 安装依赖
 pip install pynacl pytest numpy
 
-# 运行全部测试 (45 项)
+# 运行全部测试 (50 项)
 python3 -m pytest tests/ -q
 
 # 运行 v0.3 真实 UDP 三档弱网联调 (正常/15%/40%+断连/多流复用)

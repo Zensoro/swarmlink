@@ -408,16 +408,19 @@ class GroundReceiver:
                  send_arq_func: Callable,
                  on_frame_complete: Callable,
                  rto_ms: int = 50, max_retries: int = 5,
-                 fec_k: int = 10, fec_n: int = 14):
+                 fec_k: int = 10, fec_n: int = 14,
+                 stream_id: int = 0):
         self.client_id = client_id
         self.session_tag = session_tag
+        self.stream_id = stream_id
         self._reasm = reassembler
         self._decrypt = decryptor_func
         self._send_arq = send_arq_func
         self._on_complete = on_frame_complete
 
         self._arq_client = ARQClient(session_tag, client_id,
-                                     send_callback=send_arq_func)
+                                     send_callback=send_arq_func,
+                                     stream_id=stream_id)
         self._loss = LossDetector(session_tag, client_id, self._arq_client,
                                   rto_ms=rto_ms, max_retries=max_retries,
                                   fec_k=fec_k, fec_n=fec_n)
@@ -476,6 +479,8 @@ class GroundReceiver:
             return
         if hdr.session_tag != self.session_tag:
             return
+        if hdr.stream_id != self.stream_id:
+            return  # 只处理本流的包 (视频/控制/遥测各自独立)
         if hdr.is_arq_req():
             return  # 地面端不处理别人的重传请求
 

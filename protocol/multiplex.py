@@ -51,6 +51,15 @@ except ImportError:
         FLAG_ARQ_REP, flags_for, SUPPORTED_STREAMS,
     )
 
+try:
+    from .arq_full import PacketStore, ARQAggregatorV2, LossDetector
+    from .arq import ARQClient
+except ImportError:
+    import sys as _sys, os as _os
+    _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    from protocol.arq_full import PacketStore, ARQAggregatorV2, LossDetector
+    from protocol.arq import ARQClient
+
 
 # ============================================================
 # 流类型定义
@@ -462,6 +471,202 @@ class StreamDemultiplexer:
             result[sid] = s
         result["total_packets"] = self._total_recv
         return result
+
+
+# ============================================================
+# 可靠流通道: 控制/遥测流 (单包 + ARQ 重传, 复用 arq_full 组件)
+# ============================================================
+class ReliableChannel:
+    """
+    一条可靠流的端到端通道。控制消息小而少, 不分片不 FEC:
+      发送: 单包 + RELIABLE flag → PacketStore 存底 → 发出
+      接收: 到齐 → 回调; 缺失 → LossDetector 指数退避发 REQ
+      重传: 天空端收 REQ → ARQAggregatorV2 合并窗口 → 原包重发
+
+    这是"控制流可靠必达"的真实实现 (此前 STREAM_CONFIG 只标注了
+    arq_enabled=True 但没有实际 ARQ 逻辑)。
+    """
+
+    def __init__(self, session_tag: int, stream_id: int,
+                 encrypt_func=None, decryptor_func=None,
+                 client_id: int = 0,
+                 on_message: Optional[Callable] = None,
+                 send_arq_func: Optional[Callable] = None,
+                 rto_ms: int = 40, max_retries: int = 16,
+                 store_ttl: float = 6.0):
+        import threading as _t
+        self.session_tag = session_tag
+        self.stream_id = stream_id
+        self._encrypt = encrypt_func
+        self._decrypt = decryptor_func
+        self.client_id = client_id
+        self._on_message = on_message
+        self._send_arq = send_arq_func
+
+        # 发送侧: 重传出口 (由外部接入 mux/socket)
+        self._retransmit_func = None
+
+        self._store = PacketStore(max_frames=200, ttl_sec=store_ttl)
+        self._arq = ARQAggregatorV2(
+            session_tag=session_tag,
+            packet_store=self._store,
+            retransmit_callback=self._retransmit,
+            window_ms=20,
+        )
+        self._seq = 0
+
+        # 接收侧: 滑动窗口 (单包消息顺序交付 + 空洞检测)
+        self._arq_client = ARQClient(session_tag, client_id,
+                                     send_callback=send_arq_func,
+                                     stream_id=stream_id)
+        self._next_seq = 0          # 下一个期望的 frame_id
+        self._buffered: dict = {}   # 已到但未交付 (前面有洞)
+        self._retry: dict = {}      # fid -> (尝试次数, 最后尝试时间)
+        self._rto_ms = rto_ms
+        self._max_retries = max_retries
+        self._window = 256          # 滑窗上限
+        self._lock = _t.Lock()
+        self._last_recv = 0.0       # 最后一次成功交付时间 (静默探测用)
+        self._gaveup_seen: dict = {}
+        self._stats = {
+            "sent": 0, "recv": 0, "retransmits": 0,
+            "recovered": 0, "gaveup": 0, "reqs_sent": 0,
+        }
+
+    def set_retransmit_func(self, fn: Callable):
+        """设置重传出口 (通常指向 mux.submit_packet 或 socket.send)"""
+        self._retransmit_func = fn
+
+    # ---------------- 发送侧 (天空端) ----------------
+    def send_message(self, data: bytes) -> bool:
+        """发送一条可靠消息 (单包)。返回是否入队成功。"""
+        frame_id = self._seq
+        self._seq = (self._seq + 1) & 0xFFFFFFFF
+
+        flags = FLAG_RELIABLE | FLAG_LAST_FRAG
+        payload = data
+        if self._encrypt is not None:
+            payload = self._encrypt(payload)
+            flags |= FLAG_ENCRYPTED
+
+        hdr = pack_header(
+            session_tag=self.session_tag,
+            frame_id=frame_id, frag_id=0, total_frags=1,
+            flags=flags, stream_id=self.stream_id,
+            frame_len=len(data),
+        )
+        pkt = hdr + payload
+
+        self._store.put(frame_id, [pkt])
+        self._stats["sent"] += 1
+        if self._retransmit_func:
+            self._retransmit_func(pkt)
+        return True
+
+    def handle_arq_request(self, packet: bytes, client_id: int):
+        """天空端: 收到地面端 REQ → 合并 → 重传"""
+        self._arq.receive_request(packet, client_id)
+
+    def tick_arq(self):
+        self._arq.maybe_flush()
+
+    def flush_arq(self):
+        self._arq.flush()
+
+    def _retransmit(self, packet: bytes, recipients=None):
+        self._stats["retransmits"] += 1
+        if self._retransmit_func:
+            self._retransmit_func(packet)
+
+    # ---------------- 接收侧 (地面端) ----------------
+    def feed(self, packet: bytes) -> Optional[bytes]:
+        """地面端: 收包 → 解密 → 滑窗 → 顺序交付。返回消息或 None"""
+        try:
+            hdr = unpack_header(packet)
+        except HeaderError:
+            return None
+        if hdr.session_tag != self.session_tag:
+            return None
+        if hdr.stream_id != self.stream_id:
+            return None
+        if hdr.is_arq_req():
+            return None
+
+        # 解密
+        payload = packet[HEADER_SIZE:]
+        if hdr.is_encrypted() and self._decrypt is not None:
+            plain = self._decrypt(payload)
+            if plain is None:
+                return None
+            payload = plain
+
+        if hdr.is_arq_rep():
+            self._arq_client.ack_received(hdr.frame_id, hdr.frag_id)
+            self._stats["recovered"] += 1
+
+        fid = hdr.frame_id
+        # 已交付过的 (滑窗左侧) → 丢弃
+        if fid < self._next_seq:
+            return False
+        # 乱序缓存 (滑窗内已到但前面有洞)
+        if fid in self._buffered:
+            return False
+        self._buffered[fid] = payload
+
+        # 尝试连续交付: 从 _next_seq 开始
+        delivered = False
+        while self._next_seq in self._buffered:
+            msg = self._buffered.pop(self._next_seq)
+            self._next_seq += 1
+            self._stats["recv"] += 1
+            self._arq_client.clear_frame(self._next_seq - 1)
+            delivered = True
+            if self._on_message:
+                self._on_message(msg)
+        if delivered:
+            self._last_recv = time.monotonic()
+
+        # 清理滑窗左侧越界缓存
+        while self._buffered and min(self._buffered) > self._next_seq + self._window:
+            self._buffered.pop(min(self._buffered))
+        return delivered
+
+    def tick_loss_check(self):
+        """地面端: 扫描滑窗空洞 + 静默探测 → 指数退避发 REQ"""
+        now = time.monotonic()
+        with self._lock:
+            # 1) 空洞检测: 期望序号之后最远已收包之间全是洞
+            if self._buffered:
+                farthest = max(self._buffered)
+                for fid in range(self._next_seq, farthest):
+                    if fid in self._buffered:
+                        continue
+                    self._maybe_req(fid, now)
+
+            # 2) 静默探测: 收到消息后空闲超过 RTO → 探测下一个序号
+            #    单包事件流没有"流终止信号", 最后一条丢失时接收端无从知道。
+            #    空闲即探测: 服务端 store 有货 → 重传; 没货 → 退避后放弃。
+            if (self._last_recv > 0
+                    and (now - self._last_recv) * 1000 >= self._rto_ms):
+                self._maybe_req(self._next_seq, now)
+
+    def _maybe_req(self, fid: int, now: float):
+        n, last = self._retry.get(fid, (0, 0.0))
+        if n >= self._max_retries:
+            # gaveup 只在到达上限的当次 +1 (n == max_retries 且未记录过 gaveup)
+            if not self._gaveup_seen.get(fid):
+                self._gaveup_seen[fid] = True
+                self._stats["gaveup"] = self._stats.get("gaveup", 0) + 1
+            return
+        # 指数退避封顶 1s, 避免长空闲时无限拉长
+        backoff = min(self._rto_ms * (2 ** n), 1000) / 1000.0
+        if (now - last) >= backoff:
+            self._arq_client.request(fid, 0, allow_resend=True)
+            self._retry[fid] = (n + 1, now)
+            self._stats["reqs_sent"] = self._stats.get("reqs_sent", 0) + 1
+
+    def stats(self) -> dict:
+        return dict(self._stats)
 
 
 # ============================================================
