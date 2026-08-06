@@ -1,12 +1,12 @@
 """
-SwarmLink Packet Header — 16 字节紧凑版
+SwarmLink Packet Header — 20 字节紧凑版
 ==========================================
 对齐方式：大端（network byte order），缓存友好
 
 字段排布（按字节）：
-+0        +4        +8        +12       +16
-| session_tag | frame_id | frag_id | total_frags | flags | stream_id | crc |
-    4B          4B         2B         2B         1B       1B       2B
++0        +4        +8        +12       +16       +20
+| session_tag | frame_id | frag_id | total_frags | flags | stream_id | frame_len | crc |
+    4B          4B         2B         2B         1B       1B        4B        2B
 
 字段说明：
 - session_tag (4B) : 会话标识，DH 建邻后派生，区分不同"飞行任务"
@@ -15,6 +15,7 @@ SwarmLink Packet Header — 16 字节紧凑版
 - total_frags (2B) : 本帧总分片数
 - flags       (1B) : 位域，见下方 FLAG_*
 - stream_id   (1B) : 0=图传 1=控制 2=遥测 3=中继（预留）
+- frame_len   (4B) : 原始帧真实长度（重组时裁剪分片补零），0=未知/不裁剪
 - crc         (2B) : 头校验（CRC16-CCITT），快速丢弃坏包
 
 FLAG 位域（从高位到低位）：
@@ -37,7 +38,7 @@ import struct
 import zlib
 
 # --- 常量 ---
-HEADER_SIZE = 16
+HEADER_SIZE = 20
 MAX_FRAG_ID = 0xFFFF        # 65535
 MAX_FRAME_ID = 0xFFFFFFFF   # 约 42 亿
 SUPPORTED_STREAMS = {
@@ -58,21 +59,25 @@ FLAG_RELIABLE   = 0x02
 FLAG_RESERVED   = 0x01
 
 # --- 打包/解包 ---
-HEADER_STRUCT = struct.Struct("!I I H H B B")  # 14 字节（不含尾部 2B crc）
+HEADER_STRUCT = struct.Struct("!I I H H B B I")  # 18 字节（不含尾部 2B crc）
 
 
 def pack_header(session_tag: int, frame_id: int, frag_id: int,
-                total_frags: int, flags: int, stream_id: int) -> bytes:
-    """构造 16 字节头。crc 自动从前面 14 字节算出。"""
+                total_frags: int, flags: int, stream_id: int,
+                frame_len: int = 0) -> bytes:
+    """构造 20 字节头。crc 自动从前面 18 字节算出。
+    frame_len = 原始帧真实长度；默认 0（未知/不裁剪），保持向后兼容。
+    """
     assert 0 <= session_tag < (1 << 32)
     assert 0 <= frame_id    < (1 << 32)
     assert 0 <= frag_id     < (1 << 16)
     assert 0 <= total_frags < (1 << 16)
     assert 0 <= flags       < (1 << 8)
     assert 0 <= stream_id   < (1 << 8)
+    assert 0 <= frame_len   < (1 << 32)
 
     pre = HEADER_STRUCT.pack(session_tag, frame_id, frag_id,
-                              total_frags, flags, stream_id)
+                             total_frags, flags, stream_id, frame_len)
     crc = zlib.crc32(pre) & 0xFFFF
     return pre + struct.pack("!H", crc)
 
@@ -81,30 +86,31 @@ def unpack_header(data: bytes):
     """解包。crc 校验失败抛 HeaderError。返回命名元组。"""
     if len(data) < HEADER_SIZE:
         raise HeaderError(f"packet too short: {len(data)} < {HEADER_SIZE}")
-    pre = data[:14]
-    crc_recv = struct.unpack("!H", data[14:16])[0]
+    pre = data[:18]
+    crc_recv = struct.unpack("!H", data[18:20])[0]
     crc_calc = zlib.crc32(pre) & 0xFFFF
     if crc_recv != crc_calc:
         raise HeaderError(f"header crc mismatch: recv={crc_recv:#x} calc={crc_calc:#x}")
-    session_tag, frame_id, frag_id, total_frags, flags, stream_id = \
+    session_tag, frame_id, frag_id, total_frags, flags, stream_id, frame_len = \
         HEADER_STRUCT.unpack(pre)
     return Header(session_tag, frame_id, frag_id, total_frags,
-                  flags, stream_id, data[:HEADER_SIZE])
+                  flags, stream_id, frame_len, data[:HEADER_SIZE])
 
 
 class Header:
     """解包后的头对象，附带若干便利方法。"""
     __slots__ = ("session_tag", "frame_id", "frag_id", "total_frags",
-                 "flags", "stream_id", "raw")
+                 "flags", "stream_id", "frame_len", "raw")
 
     def __init__(self, session_tag, frame_id, frag_id, total_frags,
-                 flags, stream_id, raw: bytes):
+                 flags, stream_id, frame_len, raw: bytes):
         self.session_tag = session_tag
         self.frame_id = frame_id
         self.frag_id = frag_id
         self.total_frags = total_frags
         self.flags = flags
         self.stream_id = stream_id
+        self.frame_len = frame_len
         self.raw = raw
 
     # --- flag 检查 ---

@@ -10,7 +10,7 @@
 
 ## v0.2 已交付能力
 
-### 🔐 安全层（军用/行业级标准）
+### 🔐 安全层（行业级标准）
 | 能力 | 实现 | 对标标准 |
 |---|---|---|
 | 保密性 | ChaCha20-Poly1305 AEAD | TLS 1.3 / Signal |
@@ -18,9 +18,12 @@
 | 前向安全 | 每会话新 ephemeral key | Signal / Telegram Secret Chat |
 | 防重放 | nonce 滑动窗口 (1024) | NSA Suite B |
 | 防串看 | 每对设备独立 session_key | 行业级隔离 |
-| 篡改检测 | Poly1305 MAC (AEAD 内置) | RFC 7539 |
+| 篡改检测 | AEAD 内置 MAC | RFC 7539 |
 
-> ⚠️ 非真军用：无 HSM/SE/TEE，无国密 SM 系列。适用于消防、边防、电力巡检等高安全需求场景。
+> ⚠️ 诚实声明：
+> - **`security_nacl.py`（推荐）**：PyNaCl / libsodium 真 AEAD（ChaCha20-Poly1305 IETF 构造）
+> - **`security.py`（纯 Python 备用）**：ChaCha20 加密 + **HMAC-SHA256 替代 Poly1305**（自定义构造，非 RFC 7539 标准 AEAD，仅用于无 C 依赖的 PoC）
+> - 非真军用：无 HSM/SE/TEE，无国密 SM 系列。适用于消防、边防、电力巡检等高安全需求场景。
 
 ### 📡 ARQ 完整重传链路
 - **A 方案（默认）**：N 个客户端请求同分片 → 合并成 1 次重传 → 广播
@@ -38,7 +41,10 @@
 
 ```bash
 # 安装依赖
-pip install pynacl
+pip install pynacl pytest
+
+# 运行全部测试 (40 项)
+python3 -m pytest tests/ -q
 
 # 运行 v0.2 核心功能验证
 python3 tests/test_v02_core.py
@@ -46,8 +52,8 @@ python3 tests/test_v02_core.py
 # 运行端到端 Demo (30% 丢包 + 断连)
 python3 examples/sky_to_ground.py --loss 0.30 --blackout-prob 0.005
 
-# 运行 v0.1 单元测试
-python3 -m pytest tests/test_protocol.py -v
+# 运行 v0.3 真实 UDP 三档弱网联调 (正常/15%/40%+断连)
+python3 examples/udp_e2e_test.py
 ```
 
 ---
@@ -57,19 +63,21 @@ python3 -m pytest tests/test_protocol.py -v
 ```
 swarmlink/
 ├── protocol/
-│   ├── header.py        # 16B 协议头 (session/frame/frag/crc/flags)
-│   ├── fragment.py      # 分片器 + 重组器 + FEC 引擎
+│   ├── header.py        # 20B 协议头 (session/frame/frag/crc/flags/frame_len)
+│   ├── fragment.py      # 分片器 + 重组器 (按 frame_len 裁剪补零) + FEC 引擎
 │   ├── rs_codec.py      # Reed-Solomon(10,14) GF(256)
 │   ├── arq.py          # ARQ 聚合器 A 方案 + ClientBitmap B 方案
 │   ├── arq_full.py     # ARQ 完整链路 (SkySender/GroundReceiver/LossDetector)
-│   └── security.py     # 🆕 v0.2 安全层 (DH/AEAD/防重放/前向安全)
-├── tests/
-│   ├── test_protocol.py      # v0.1 单元测试 (13 项)
+│   ├── security_nacl.py # 🆕 v0.3 安全层 (PyNaCl 真 AEAD, 推荐)
+│   └── security.py     # v0.2 安全层 (纯 Python 备用, Poly1305 以 HMAC 替代)
+├── tests/              # 40 项测试, pytest 全绿
+│   ├── test_protocol.py      # v0.1 单元测试
 │   ├── weaknet.py           # 弱网模拟器 + 性能度量
-│   ├── test_v02_core.py     # 🆕 v0.2 核心验证 (6 项)
+│   ├── test_v02_core.py     # v0.2 核心验证
 │   └── test_security_arq.py
 ├── examples/
-│   └── sky_to_ground.py    # 端到端 Demo
+│   ├── sky_to_ground.py    # 端到端 Demo (30% 丢包 + 断连)
+│   └── udp_e2e_test.py    # 🆕 v0.3 真实 UDP 三档弱网联调
 ├── docs/
 │   ├── VISION.md
 │   ├── ARCHITECTURE.md
@@ -110,17 +118,19 @@ swarmlink/
 
 ---
 
-## 协议头格式 (16B)
+## 协议头格式 (20B)
 
 ```
-+0        +4        +8        +12       +16
-| session_tag | frame_id | frag_id | total_frags | flags | stream_id | crc |
-    4B          4B         2B         2B         1B       1B       2B
++0        +4        +8        +12       +16       +20
+| session_tag | frame_id | frag_id | total_frags | flags | stream_id | frame_len | crc |
+    4B          4B         2B         2B         1B       1B         4B         2B
 ```
 
 **FLAG 位域**：KEY_FRAME | FEC_PARITY | LAST_FRAG | ARQ_REQ | ARQ_REP | ENCRYPTED | RELIABLE | RESERVED
 
-**安全头 (加密包附加)**：8B nonce + 16B Poly1305 tag = 24B/包
+**frame_len**：原始帧真实长度（4B）。分片补零在重组时按此裁剪，接收端拿到的帧与发送端逐字节一致。
+
+**安全头 (加密包附加)**：8B nonce + 16B tag = 24B/包
 
 ---
 
@@ -130,7 +140,7 @@ swarmlink/
 |---|---|---|
 | v0.1 | ✅ 完成 | 协议头 + 分片/FEC + ARQ 聚合 + 弱网模拟 |
 | **v0.2** | **✅ 完成** | **安全层 + ARQ 完整链路 + 性能基准** |
-| v0.3 | ⏳ 下一步 | Session 管理 + 多流复用 (图传/控制/遥测) |
+| **v0.3** | **🛠 进行中** | 多流复用 (multiplex.py) + 会话管理 (pairing.py) + 真实 UDP 联调 ✅ + 多轮 ARQ 闭环 ✅ + frame_len 帧长保真 ✅ |
 | v0.4 | 规划 | SFU 选择性转发 + Simulcast/SVC 多版本 |
 | v0.5 | 规划 | 一致性哈希路由 + 三级拓扑 + stale-while-revalidate |
 | v0.6 | 规划 | RLNC 可插拔 + ns-3 集成 + Gilbert-Elliott 模型 |

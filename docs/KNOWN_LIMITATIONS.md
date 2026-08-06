@@ -12,12 +12,13 @@
 - **修复**: 切换到 PyNaCl (C 绑定 libsodium) → ~200 MB/s, 20x 加速
 - **优先级**: v0.3 修复 (一行 import 切换)
 
-### 2. ARQ 多轮重传在测试脚本中未完全闭环
+### 2. ~~ARQ 多轮重传在测试脚本中未完全闭环~~ ✅ v0.3 已修复
 - **现状**: 单轮重传 + FEC 恢复验证通过, 但多轮迭代的端到端自动化测试有循环时序问题
 - **影响**: 30%+ 高丢包率下需多轮 ARQ 才能凑齐 10 片, 当前测试未覆盖
 - **根因**: 测试用 deque 模拟链路, 循环顺序需更精细的时序控制
-- **修复**: v0.3 用真实 UDP socket, 时序自然正确; 或重写测试用 async/await
-- **协议本身正确**: security + arq_full 模块逻辑已验证
+- **修复 (v0.3)**: `examples/udp_e2e_test.py` 真实 UDP socket + 弱网整形, 多轮 ARQ 已闭环;
+  修复 inflight 永久卡死 (REQ/REP 单向丢包时 `allow_resend`)、合并窗口 (20ms `maybe_flush`)、
+  ARQ_REP 头部字段保真 (`total_frags`/`stream_id`/`ENCRYPTED`/`frame_len` 不再丢失)
 
 ### 3. 弱网模拟精度有限
 - **现状**: 均匀随机丢包, 非真实 Wi-Fi 突发模型
@@ -47,7 +48,7 @@
 ## v0.1 遗留限制 (仍有效)
 
 ### 7. 协议头不加密
-- **现状**: 16B 头明文 (路由/分片/FEC 需要), 仅 payload 加密
+- **现状**: 20B 头明文 (路由/分片/FEC 需要), 仅 payload 加密
 - **影响**: 攻击者可知 session/frame/frag 结构 (但看不到内容)
 - **评估**: WFB-ng / MTProto 同样做法, 可接受
 

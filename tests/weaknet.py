@@ -8,6 +8,7 @@ MetricsCollector: 收集 PSNR/延迟/卡顿率/重传开销，最后出图
 import time
 import random
 import heapq
+import threading
 from collections import deque
 from typing import Optional
 
@@ -36,9 +37,12 @@ class WeakNetSimulator:
         self.blackout_prob = blackout_prob
         self.rng = random.Random(seed)
 
-        self._queue = []  # 堆：(deliver_time, packet)
+        self._queue = []  # 堆：(deliver_time, seq, packet)
+        self._seq = 0     # 单调序号，避免 bytes 参与堆比较
         self._blackout_until = 0.0
         self._now = time.monotonic
+        # send() 由应用线程调用、recv() 由 UDP 泵线程调用 → 必须加锁
+        self._lock = threading.Lock()
 
         # 统计
         self.packets_in = 0
@@ -47,42 +51,45 @@ class WeakNetSimulator:
         self.blackouts_triggered = 0
 
     def send(self, packet: bytes):
-        self.packets_in += 1
-        # 1) 断连期间：全丢
-        if self._now() < self._blackout_until:
-            self.packets_lost += 1
-            return
-        # 2) 概率触发断连
-        if self.blackout_prob > 0 and self.rng.random() < self.blackout_prob:
-            self._blackout_until = self._now() + self.blackout_ms / 1000
-            self.blackouts_triggered += 1
-            self.packets_lost += 1
-            return
-        # 3) 普通丢包
-        if self.rng.random() < self.loss_rate:
-            self.packets_lost += 1
-            return
-        # 4) 延迟 + 抖动
-        d = self.delay_ms + self.rng.uniform(-self.jitter_ms, self.jitter_ms)
-        deliver_at = self._now() + max(0, d) / 1000
-        heapq.heappush(self._queue, (deliver_at, packet))
+        with self._lock:
+            self.packets_in += 1
+            # 1) 断连期间：全丢
+            if self._now() < self._blackout_until:
+                self.packets_lost += 1
+                return
+            # 2) 概率触发断连
+            if self.blackout_prob > 0 and self.rng.random() < self.blackout_prob:
+                self._blackout_until = self._now() + self.blackout_ms / 1000
+                self.blackouts_triggered += 1
+                self.packets_lost += 1
+                return
+            # 3) 普通丢包
+            if self.rng.random() < self.loss_rate:
+                self.packets_lost += 1
+                return
+            # 4) 延迟 + 抖动
+            d = self.delay_ms + self.rng.uniform(-self.jitter_ms, self.jitter_ms)
+            deliver_at = self._now() + max(0, d) / 1000
+            self._seq += 1
+            heapq.heappush(self._queue, (deliver_at, self._seq, packet))
 
     def recv(self, timeout_ms: int = 0) -> Optional[bytes]:
         """取出一个已到时间的包。timeout_ms=0 表示非阻塞。"""
         now = self._now()
         deadline = now + timeout_ms / 1000
-        while self._queue:
-            deliver_at, packet = self._queue[0]
-            if deliver_at <= now:
-                heapq.heappop(self._queue)
-                self.packets_out += 1
-                return packet
-            if timeout_ms > 0 and deliver_at > deadline:
+        while True:
+            with self._lock:
+                if not self._queue:
+                    break
+                deliver_at = self._queue[0][0]
+                if deliver_at <= now:
+                    _, _, packet = heapq.heappop(self._queue)
+                    self.packets_out += 1
+                    return packet
+            if timeout_ms <= 0 or deliver_at > deadline:
                 break
             # 还没到时间
-            if timeout_ms == 0:
-                break
-            time.sleep(min(0.001, (deliver_at - now) / 2))
+            time.sleep(min(0.001, max(0.0, (deliver_at - now) / 2)))
             now = self._now()
         return None
 
@@ -97,14 +104,15 @@ class WeakNetSimulator:
         return out
 
     def stats(self) -> dict:
-        return {
-            "packets_in": self.packets_in,
-            "packets_out": self.packets_out,
-            "packets_lost": self.packets_lost,
-            "loss_pct": (self.packets_lost / max(1, self.packets_in)) * 100,
-            "queued": len(self._queue),
-            "blackouts": self.blackouts_triggered,
-        }
+        with self._lock:
+            return {
+                "packets_in": self.packets_in,
+                "packets_out": self.packets_out,
+                "packets_lost": self.packets_lost,
+                "loss_pct": (self.packets_lost / max(1, self.packets_in)) * 100,
+                "queued": len(self._queue),
+                "blackouts": self.blackouts_triggered,
+            }
 
 
 # --- 性能度量 ---

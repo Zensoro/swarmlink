@@ -135,10 +135,17 @@ class ARQClient:
         # 已请求过但尚未收到回复的，避免重复请求
         self._inflight: set = set()
 
-    def request(self, frame_id: int, frag_id: int):
-        """请求重传某个分片。"""
+    def request(self, frame_id: int, frag_id: int,
+                allow_resend: bool = False):
+        """请求重传某个分片。
+
+        allow_resend=False（默认）：同一分片只请求一次，等回复。
+        allow_resend=True：允许重复请求。用于上层（LossDetector）已经
+          自带指数退避的场景 —— 否则 REQ 或 REP 任意一个方向丢包时，
+          inflight 会永久卡住该分片，多轮 ARQ 直接失效。
+        """
         key = (frame_id, frag_id)
-        if key in self._inflight:
+        if key in self._inflight and not allow_resend:
             return  # 已请求过，等回复
         self._inflight.add(key)
         hdr = pack_header(
@@ -157,6 +164,10 @@ class ARQClient:
     def ack_received(self, frame_id: int, frag_id: int):
         """收到 REP 后调用，清除 inflight。"""
         self._inflight.discard((frame_id, frag_id))
+
+    def clear_frame(self, frame_id: int):
+        """整帧已完成/放弃，清掉该帧全部 inflight，防止无界增长。"""
+        self._inflight = {k for k in self._inflight if k[0] != frame_id}
 
     def on_packet(self, packet: bytes) -> Optional[bytes]:
         """收到任意包时调用，若是 REP 则提取数据返回。"""

@@ -63,11 +63,16 @@ class PacketStore:
         self.ttl = ttl_sec
         # frame_id -> {frag_id: packet_bytes}
         self._store: Dict[int, Dict[int, bytes]] = {}
+        self._times: Dict[int, float] = {}
         self._order: deque = deque()
         self._lock = threading.Lock()
+        self._stats = {"hits": 0, "misses": 0, "evicted_ttl": 0,
+                       "evicted_cap": 0}
 
-    def put(self, frame_id: int, packets: list):
+    def put(self, frame_id: int, packets: list, now: float = None):
         """存储一帧的所有包"""
+        if now is None:
+            now = time.monotonic()
         with self._lock:
             if frame_id in self._store:
                 return
@@ -78,16 +83,20 @@ class PacketStore:
                     self._store[frame_id][hdr.frag_id] = pkt
                 except HeaderError:
                     continue
+            self._times[frame_id] = now
             self._order.append(frame_id)
-            self._evict()
+            self._evict(now)
 
     def get(self, frame_id: int, frag_id: int) -> Optional[bytes]:
         """查表: 返回原始包 (含 16B 头)"""
         with self._lock:
             frame = self._store.get(frame_id)
-            if frame is None:
-                return None
-            return frame.get(frag_id)
+            pkt = frame.get(frag_id) if frame else None
+            if pkt is None:
+                self._stats["misses"] += 1
+            else:
+                self._stats["hits"] += 1
+            return pkt
 
     def get_frame_packets(self, frame_id: int) -> Optional[Dict[int, bytes]]:
         """获取整帧所有包 (用于 B 方案选择性重发)"""
@@ -97,25 +106,31 @@ class PacketStore:
                 return None
             return dict(frame)
 
-    def _evict(self):
-        """淘汰过期和超容量的帧"""
-        now = time.monotonic()
-        # TTL 淘汰
-        to_remove = []
-        for fid in self._order:
-            # 用 fid 在 order 中的位置判断 TTL (简化: 超容量即过期)
-            pass
+    def _evict(self, now: float):
+        """淘汰过期和超容量的帧 (FIFO + TTL, order 天然按时间递增)"""
+        # TTL 淘汰: 队头最老, 一旦不过期就可以停
+        while self._order:
+            fid = self._order[0]
+            born = self._times.get(fid)
+            if born is not None and (now - born) <= self.ttl:
+                break
+            self._order.popleft()
+            self._store.pop(fid, None)
+            self._times.pop(fid, None)
+            self._stats["evicted_ttl"] += 1
         # 容量淘汰 (FIFO)
         while len(self._order) > self.max_frames:
             old_fid = self._order.popleft()
             self._store.pop(old_fid, None)
+            self._times.pop(old_fid, None)
+            self._stats["evicted_cap"] += 1
 
     def stats(self) -> dict:
         with self._lock:
-            return {
-                "frames_stored": len(self._store),
-                "total_packets": sum(len(v) for v in self._store.values()),
-            }
+            s = dict(self._stats)
+            s["frames_stored"] = len(self._store)
+            s["total_packets"] = sum(len(v) for v in self._store.values())
+            return s
 
 
 # ============================================================
@@ -140,6 +155,7 @@ class ARQAggregatorV2(ARQAggregator):
             "reqs_merged": 0,
             "retransmits_sent": 0,
             "bytes_saved": 0,
+            "store_misses": 0,
         }
 
     def receive_request(self, packet: bytes, client_id: int):
@@ -166,6 +182,17 @@ class ARQAggregatorV2(ARQAggregator):
         if (now - self._last_flush) * 1000 >= self.window_ms:
             self.flush()
 
+    def maybe_flush(self, now: float = None):
+        """按合并窗口节流刷新。
+
+        主循环应该调用这个而不是 flush()：无条件 flush 会让每个
+        REQ 一到就立刻重传, 20ms 合并窗口形同虚设, 多客户端合并率恒为 0。
+        """
+        if now is None:
+            now = time.monotonic()
+        if (now - self._last_flush) * 1000 >= self.window_ms:
+            self.flush()
+
     def flush(self):
         """合并重传 + 可选 bitmap 精确发送"""
         if not self._pending:
@@ -175,28 +202,56 @@ class ARQAggregatorV2(ARQAggregator):
         for (frame_id, frag_id), clients in list(self._pending.items()):
             pkt = self._packet_store.get(frame_id, frag_id)
             if pkt is None:
+                # 已过 TTL 或当时就没存下 → 无法重传
+                self._stats["store_misses"] += 1
                 continue
 
             waiter_count = len(clients)
             self._stats["reqs_merged"] += waiter_count - 1  # 节省的次数
             self._stats["retransmits_sent"] += 1
+            self._stats["bytes_saved"] += (waiter_count - 1) * len(pkt)
+
+            rep_packet = self._make_rep_packet(pkt)
+            if rep_packet is None:
+                continue
 
             if self._use_bitmap:
                 # B 方案: 只发给真正缺的人 (通过回调传 recipients)
                 recipients = self._bitmap.recipients(frame_id, frag_id)
-                rep_packet = self._make_rep_header(
-                    frame_id, frag_id, waiter_count) + pkt[HEADER_SIZE:]
                 if self._retransmit:
                     self._retransmit(rep_packet, recipients)
+                for cid in clients:
+                    self._bitmap.clear(frame_id, frag_id, cid)
             else:
                 # A 方案: 无脑广播
-                rep_packet = self._make_rep_header(
-                    frame_id, frag_id, waiter_count) + pkt[HEADER_SIZE:]
                 if self._retransmit:
                     self._retransmit(rep_packet, None)  # None = broadcast
 
         self._pending.clear()
         self._last_flush = time.monotonic()
+
+    def _make_rep_packet(self, orig_packet: bytes) -> Optional[bytes]:
+        """基于原始包重建 ARQ_REP。
+
+        关键修复：不能用基类的 _make_rep_header —— 它把 total_frags 挪用成
+        "等待者数"，并且丢掉了 stream_id / FEC_PARITY / ENCRYPTED 标志位。
+        接收端拿到这种头，重组器会算错应有分片数、也不知道 payload 是密文。
+        这里改为：完整保留原头字段，只额外 OR 上 ARQ_REP 位。
+        """
+        try:
+            h = unpack_header(orig_packet)
+        except HeaderError:
+            return None
+        rep_header = pack_header(
+            session_tag=h.session_tag,
+            frame_id=h.frame_id,
+            frag_id=h.frag_id,
+            total_frags=h.total_frags,      # 保真，不再挪用
+            flags=h.flags | FLAG_ARQ_REP,   # 保留 ENCRYPTED / FEC_PARITY
+            stream_id=h.stream_id,
+            frame_len=h.frame_len,          # 保留原始帧长
+        )
+        return rep_header + orig_packet[HEADER_SIZE:]
 
     def stats(self) -> dict:
         s = super().stats()
@@ -217,47 +272,52 @@ class LossDetector:
     运行在地面端。监控 Reassembler 的进度,
     检测哪些分片超时未到 → 触发 ARQ_REQ。
 
-    算法:
-    - 收到分片时, 更新预期窗口
-    - 超过 RTO (重传超时) 还没收到的分片 → 标记为 lost
-    - 向 ARQClient 发送重传请求
-    - 指数退避: 同一分片重试间隔翻倍, 防止风暴
+    算法 (FEC 感知版):
+    - 一帧 RS(k,n) 只要收到任意 k 片即可解出, 不需要凑齐特定分片
+    - 所以只请求 "亏空数" deficit = k - 已收片数, 而不是所有缺失片
+    - 优先请求数据片 (frag_id < k), 冗余片不值得重传
+    - 给 FEC 和在途包留一个 grace 窗口, 避免刚丢就狂发 REQ
+    - 指数退避: 同一分片重试间隔翻倍, 防止 ARQ 风暴
     """
     def __init__(self, session_tag: int, client_id: int,
                  arq_client: ARQClient,
-                 rto_ms: int = 50, max_retries: int = 5):
+                 rto_ms: int = 50, max_retries: int = 5,
+                 fec_k: int = 10, fec_n: int = 14):
         self.session_tag = session_tag
         self.client_id = client_id
         self._arq = arq_client
         self.rto_ms = rto_ms
         self.max_retries = max_retries
+        self.fec_k = fec_k
+        self.fec_n = fec_n
 
-        # frame_id -> {frag_id: {"expected": bool, "received": bool,
-        #                        "first_seen": float, "last_retry": float,
-        #                        "retries": int}}
+        # frame_id -> {"total": int, "recv": set(frag_id),
+        #              "first": float, "retry": {frag_id: (n, last_time)},
+        #              "gaveup": bool}
         self._frames: dict = {}
         self._lock = threading.Lock()
         self._stats = {
             "loss_detected": 0,
             "reqs_sent": 0,
             "retries_exhausted": 0,
+            "frames_gaveup": 0,
+            "recovered_by_arq": 0,
         }
 
     def on_packet_received(self, frame_id: int, frag_id: int,
                            total_frags: int, now: float = None):
-        """每收到一个分片调用。更新状态, 检测缺失。"""
+        """每收到一个分片调用。更新状态。"""
         if now is None:
             now = time.monotonic()
         with self._lock:
-            frame = self._frames.setdefault(frame_id, {})
-            frame[frag_id] = {
-                "received": True,
-                "time": now,
-            }
-            # 更新预期分片数
-            for i in range(total_frags):
-                if i not in frame:
-                    frame.setdefault(i, {"received": False, "time": None})
+            f = self._frames.get(frame_id)
+            if f is None:
+                f = {"total": total_frags, "recv": set(), "first": now,
+                     "retry": {}, "gaveup": False}
+                self._frames[frame_id] = f
+            if total_frags > f["total"]:
+                f["total"] = total_frags
+            f["recv"].add(frag_id)
 
     def check_loss(self, now: float = None) -> list:
         """
@@ -268,31 +328,45 @@ class LossDetector:
             now = time.monotonic()
         requests = []
         with self._lock:
-            for frame_id, frags in list(self._frames.items()):
-                for frag_id, info in frags.items():
-                    if info.get("received"):
-                        continue
-                    # 未收到: 检查是否超时
-                    first_seen = info.get("first_seen")
-                    if first_seen is None:
-                        info["first_seen"] = now
-                        info["last_retry"] = now
-                        info["retries"] = 0
-                        continue
-                    retries = info.get("retries", 0)
-                    if retries >= self.max_retries:
+            for frame_id, f in list(self._frames.items()):
+                if f["gaveup"]:
+                    continue
+                # grace: 第一个分片到达后 rto 内不发 REQ, 等 FEC / 在途包
+                if (now - f["first"]) * 1000 < self.rto_ms:
+                    continue
+
+                need = self.fec_k - len(f["recv"])
+                if need <= 0:
+                    continue  # 片数够 FEC 解码, 交给重组器
+
+                # 只挑数据片, 按 frag_id 升序, 取 need 个
+                missing = [i for i in range(self.fec_k)
+                           if i not in f["recv"]]
+                if not missing:
+                    # 数据片都在但总数不足 → 补请求冗余片
+                    missing = [i for i in range(self.fec_k, f["total"])
+                               if i not in f["recv"]]
+                targets = missing[:need]
+
+                exhausted = 0
+                for frag_id in targets:
+                    n, last = f["retry"].get(frag_id, (0, f["first"]))
+                    if n >= self.max_retries:
+                        exhausted += 1
                         self._stats["retries_exhausted"] += 1
-                        # 标记已放弃, 不再重试
-                        info["received"] = True  # 标记为"已处理"避免重复
                         continue
-                    # 指数退避
-                    backoff = self.rto_ms * (2 ** retries) / 1000.0
-                    elapsed = now - info.get("last_retry", first_seen)
-                    if elapsed >= backoff:
+                    backoff = self.rto_ms * (2 ** n) / 1000.0
+                    if (now - last) >= backoff:
                         requests.append((frame_id, frag_id))
-                        info["last_retry"] = now
-                        info["retries"] = retries + 1
+                        f["retry"][frag_id] = (n + 1, now)
                         self._stats["reqs_sent"] += 1
+                        if n == 0:
+                            self._stats["loss_detected"] += 1
+
+                # 所有候选片都重试耗尽 → 放弃整帧
+                if targets and exhausted == len(targets):
+                    f["gaveup"] = True
+                    self._stats["frames_gaveup"] += 1
         return requests
 
     def on_frame_complete(self, frame_id: int):
@@ -303,9 +377,14 @@ class LossDetector:
     def on_rep_received(self, frame_id: int, frag_id: int):
         """收到 ARQ_REP, 标记已恢复。"""
         with self._lock:
-            frame = self._frames.get(frame_id)
-            if frame and frag_id in frame:
-                frame[frag_id]["received"] = True
+            f = self._frames.get(frame_id)
+            if f is not None and frag_id not in f["recv"]:
+                f["recv"].add(frag_id)
+                self._stats["recovered_by_arq"] += 1
+
+    def gaveup_frames(self) -> list:
+        with self._lock:
+            return [fid for fid, f in self._frames.items() if f["gaveup"]]
 
     def stats(self) -> dict:
         return dict(self._stats)
@@ -328,7 +407,8 @@ class GroundReceiver:
                  reassembler, decryptor_func: Callable,
                  send_arq_func: Callable,
                  on_frame_complete: Callable,
-                 rto_ms: int = 50):
+                 rto_ms: int = 50, max_retries: int = 5,
+                 fec_k: int = 10, fec_n: int = 14):
         self.client_id = client_id
         self.session_tag = session_tag
         self._reasm = reassembler
@@ -339,11 +419,52 @@ class GroundReceiver:
         self._arq_client = ARQClient(session_tag, client_id,
                                      send_callback=send_arq_func)
         self._loss = LossDetector(session_tag, client_id, self._arq_client,
-                                  rto_ms=rto_ms)
+                                  rto_ms=rto_ms, max_retries=max_retries,
+                                  fec_k=fec_k, fec_n=fec_n)
 
         self.completed_frames: dict = {}
         self.corrupted_frames = 0
         self._lock = threading.Lock()
+        self._stats = {
+            "pkts_in": 0,
+            "decrypt_ok": 0,
+            "decrypt_fail": 0,
+            "rep_in": 0,
+            "rep_used": 0,
+        }
+
+    # --- 核心: 逐分片解密, 解密完成之后才交给重组器 ---
+    def _open(self, packet: bytes, hdr) -> Optional[bytes]:
+        """把一个线上包还原成 [16B 明文头 + 明文分片]。
+
+        这是本次修复的核心：加密是 **按分片粒度** 做的, 每片多 24B
+        (8B nonce + 16B Poly1305 tag)。所以必须先逐片解密剥掉这 24B,
+        再把等长明文分片交给 Reassembler 拼帧。
+        以前 SkySender 加密后忘了置 FLAG_ENCRYPTED, 接收端据此判断
+        "没加密" → 直接把密文当明文拼 → 10×624=6240B, 帧校验必然失败。
+        """
+        payload = packet[HEADER_SIZE:]
+        if hdr.is_encrypted():
+            plain = self._decrypt(payload)
+            if plain is None:
+                self._stats["decrypt_fail"] += 1
+                return None
+            self._stats["decrypt_ok"] += 1
+        else:
+            plain = payload
+
+        # 重建头: 去掉 ENCRYPTED / ARQ_REP 位, 让重组器看到"一个普通分片"
+        clean_flags = hdr.flags & ~(FLAG_ENCRYPTED | FLAG_ARQ_REP)
+        clean_hdr = pack_header(
+            session_tag=hdr.session_tag,
+            frame_id=hdr.frame_id,
+            frag_id=hdr.frag_id,
+            total_frags=hdr.total_frags,
+            flags=clean_flags,
+            stream_id=hdr.stream_id,
+            frame_len=hdr.frame_len,
+        )
+        return clean_hdr + plain
 
     def feed(self, packet: bytes, now: float = None):
         """喂入一个原始包 (可能加密)。"""
@@ -353,41 +474,32 @@ class GroundReceiver:
             hdr = unpack_header(packet)
         except HeaderError:
             return
+        if hdr.session_tag != self.session_tag:
+            return
+        if hdr.is_arq_req():
+            return  # 地面端不处理别人的重传请求
 
-        # ARQ_REP: 解密后喂给重组器
-        if hdr.is_arq_rep():
-            plaintext = self._decrypt(packet[HEADER_SIZE:])
-            if plaintext is None:
-                return
-            self._loss.on_rep_received(hdr.frame_id, hdr.frag_id)
-            self._arq_client.ack_received(hdr.frame_id, hdr.frag_id)
-            # 把 REP 的 payload 当成分片喂入重组器
-            fake_packet = packet[:HEADER_SIZE] + plaintext
-            result = self._reasm.feed(fake_packet)
-            if result is not None:
-                self._handle_complete(hdr.frame_id, result, now)
+        self._stats["pkts_in"] += 1
+        is_rep = hdr.is_arq_rep()
+        if is_rep:
+            self._stats["rep_in"] += 1
+
+        # 1) 逐片解密 (先解密, 后重组 —— 顺序不能反)
+        full_packet = self._open(packet, hdr)
+        if full_packet is None:
+            # 解密失败 (篡改 / 重放 / 重复重传) → 当作没收到, 留给 FEC/ARQ
             return
 
-        # 普通数据/parity 包
-        # 如果加密, 先解密 payload
-        if hdr.is_encrypted():
-            security_blob = packet[HEADER_SIZE:]
-            plaintext = self._decrypt(security_blob)
-            if plaintext is None:
-                # 解密失败, 标记丢失
-                self._loss.on_packet_received(hdr.frame_id, hdr.frag_id,
-                                               hdr.total_frags, now)
-                return
-            # 重组器需要 16B 头 + 明文 payload
-            full_packet = packet[:HEADER_SIZE] + plaintext
+        # 2) 更新缺失检测器
+        if is_rep:
+            self._loss.on_rep_received(hdr.frame_id, hdr.frag_id)
+            self._arq_client.ack_received(hdr.frame_id, hdr.frag_id)
+            self._stats["rep_used"] += 1
         else:
-            full_packet = packet
+            self._loss.on_packet_received(hdr.frame_id, hdr.frag_id,
+                                          hdr.total_frags, now)
 
-        # 通知缺失检测器
-        self._loss.on_packet_received(hdr.frame_id, hdr.frag_id,
-                                       hdr.total_frags, now)
-
-        # 喂重组器
+        # 3) 交给重组器拼帧
         result = self._reasm.feed(full_packet)
         if result is not None:
             self._handle_complete(hdr.frame_id, result, now)
@@ -396,6 +508,7 @@ class GroundReceiver:
         with self._lock:
             self.completed_frames[frame_id] = frame_data
         self._loss.on_frame_complete(frame_id)
+        self._arq_client.clear_frame(frame_id)
         if self._on_complete:
             self._on_complete(self.client_id, frame_id, frame_data)
 
@@ -405,13 +518,20 @@ class GroundReceiver:
             now = time.monotonic()
         requests = self._loss.check_loss(now)
         for (fid, frag_id) in requests:
-            self._arq_client.request(fid, frag_id)
+            # allow_resend: LossDetector 自带指数退避, 不能被 inflight 卡死
+            self._arq_client.request(fid, frag_id, allow_resend=True)
+        # 放弃的帧: 释放重组器 buffer
+        for fid in self._loss.gaveup_frames():
+            self._reasm.drop_frame(fid)
+            self._arq_client.clear_frame(fid)
 
     def stats(self) -> dict:
+        s = dict(self._stats)
         return {
             "completed": len(self.completed_frames),
             "corrupted": self.corrupted_frames,
             "loss": self._loss.stats(),
+            "rx": s,
             "arq": {
                 "inflight": len(self._arq_client._inflight),
             },
@@ -459,6 +579,8 @@ class SkySender:
             "frames_sent": 0,
             "packets_sent": 0,
             "bytes_sent": 0,
+            "packets_encrypted": 0,
+            "retransmits": 0,
         }
 
     def send_frame(self, frame_data: bytes, frame_id: int,
@@ -468,25 +590,17 @@ class SkySender:
         if now is None:
             now = time.monotonic()
 
-        # 1) 分片 (Fragmenter 内部处理 FEC)
+        # 1) 分片 (Fragmenter 内部处理 FEC, 对明文做 RS 编码)
         packets = self._frag.fragment(frame_data, stream_id=stream_id,
                                       key_frame=key_frame)
-        # 重写 frame_id (Fragmenter 内部自增, 这里外部指定)
-        packets = self._rewrite_frame_id(packets, frame_id)
 
-        # 2) 加密 (如果 encrypt 函数存在)
-        if self._encrypt is not None:
-            encrypted_packets = []
-            for pkt in packets:
-                hdr = pkt[:HEADER_SIZE]
-                payload = pkt[HEADER_SIZE:]
-                enc_payload = self._encrypt(payload)
-                # 包 = 16B 头 + 8B nonce + 16B tag + 密文
-                encrypted_packets.append(hdr + enc_payload)
-            packets = encrypted_packets
+        # 2) 重写 frame_id + 逐分片加密 + 置 ENCRYPTED 标志 (一趟完成)
+        #    顺序: 明文分片 → RS 编码 → 逐片加密
+        #    对应接收端: 逐片解密 → RS 解码 → 拼帧
+        packets = self._seal(packets, frame_id)
 
-        # 3) 存入 PacketStore (用原始包, 重传时直接发)
-        self._store.put(frame_id, packets)
+        # 3) 存入 PacketStore (存的是最终线上包, 重传时原样发)
+        self._store.put(frame_id, packets, now=now)
 
         # 4) 发送
         for pkt in packets:
@@ -497,39 +611,59 @@ class SkySender:
         self._stats["frames_sent"] += 1
         return len(packets)
 
-    def _rewrite_frame_id(self, packets: list, frame_id: int) -> list:
-        """重写包列表中的 frame_id (Fragmenter 内部自增, 外部要控制)"""
-        rewritten = []
+    def _seal(self, packets: list, frame_id: int) -> list:
+        """重写 frame_id, 并按分片粒度加密。
+
+        修复点：加密后必须在头里置 FLAG_ENCRYPTED。
+        以前漏了这一位, 接收端 hdr.is_encrypted() 恒为 False,
+        于是把 "8B nonce + 16B tag + 密文" 整块当作明文分片拼接,
+        重组出 10×(600+24)=6240B 的垃圾帧。
+        """
+        out = []
         for pkt in packets:
-            hdr = pkt[:HEADER_SIZE]
             payload = pkt[HEADER_SIZE:]
             try:
-                old_hdr = unpack_header(hdr)
-                new_hdr = pack_header(
-                    session_tag=old_hdr.session_tag,
-                    frame_id=frame_id,
-                    frag_id=old_hdr.frag_id,
-                    total_frags=old_hdr.total_frags,
-                    flags=old_hdr.flags,
-                    stream_id=old_hdr.stream_id,
-                )
-                rewritten.append(new_hdr + payload)
+                old = unpack_header(pkt)
             except HeaderError:
-                rewritten.append(pkt)
-        return rewritten
+                out.append(pkt)
+                continue
+
+            flags = old.flags
+            if self._encrypt is not None:
+                payload = self._encrypt(payload)   # +24B (nonce+tag)
+                flags |= FLAG_ENCRYPTED            # ← 关键的一位
+                self._stats["packets_encrypted"] += 1
+
+            new_hdr = pack_header(
+                session_tag=old.session_tag,
+                frame_id=frame_id,                 # 外部指定, 覆盖内部自增
+                frag_id=old.frag_id,
+                total_frags=old.total_frags,
+                flags=flags,
+                stream_id=old.stream_id,
+                frame_len=old.frame_len,           # 保留原始帧长
+            )
+            out.append(new_hdr + payload)
+        return out
 
     def handle_arq_request(self, packet: bytes, client_id: int):
         """天空端收到 ARQ_REQ 时调用"""
         self._arq.receive_request(packet, client_id)
 
+    def tick_arq(self, now: float = None):
+        """主循环调用: 按合并窗口节流刷新 (保住聚合效果)"""
+        self._arq.maybe_flush(now)
+
     def flush_arq(self):
-        """强制刷新 ARQ 聚合器"""
+        """强制刷新 ARQ 聚合器 (收尾/测试用)"""
         self._arq.flush()
 
     def _retransmit(self, packet: bytes, recipients: Optional[list] = None):
         """实际重传函数 (可注入 recipients 做 B 方案)"""
         self._send(packet, recipients)
         self._stats["packets_sent"] += 1
+        self._stats["retransmits"] += 1
+        self._stats["bytes_sent"] += len(packet)
 
     def stats(self) -> dict:
         s = dict(self._stats)

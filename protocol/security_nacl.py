@@ -342,6 +342,23 @@ class SessionManager:
         self._session_established = True
         self._session_start = time.monotonic()
 
+    def adopt_session_key(self, session_key: bytes,
+                          peer_id: bytes = b"group"):
+        """一对多组播场景: 直接采用已分发的组会话密钥。
+
+        SFU / 多播模型下天空端只加密一次, 广播给 N 个地面端,
+        因此所有接收端必须共享同一把 session_key
+        (逐客户端 DH 会派生出不同的 key, 无法解同一份密文)。
+        组密钥本身仍由配对阶段的 DH + HKDF 产生, 再经安全信道分发。
+        每个接收端持有独立的 Decryptor → 防重放窗口互不干扰。
+        """
+        assert len(session_key) == 32
+        self._peer_id = peer_id
+        self._session_key = session_key
+        self._init_crypto()
+        self._session_established = True
+        self._session_start = time.monotonic()
+
     def _init_crypto(self):
         self._encryptor = Encryptor(self._session_key)
         self._decryptor = Decryptor(self._session_key)

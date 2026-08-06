@@ -14,6 +14,7 @@ SwarmLink 分片器 / 重组器 / FEC 引擎
 
 import os
 import struct
+from collections import deque
 from typing import List, Optional
 
 try:
@@ -74,7 +75,7 @@ class Fragmenter:
         encoded = self._rs.encode(data_group)
         total_frags = len(encoded)
 
-        # 4) 打 16B 头
+        # 4) 打 20B 头（frame_len 携带原始帧真实长度，重组端裁剪补零）
         packets = []
         base_flags = flags_for(stream_id, key_frame=key_frame)
         for idx, payload in enumerate(encoded):
@@ -84,7 +85,8 @@ class Fragmenter:
             if idx == total_frags - 1:
                 flags |= FLAG_LAST_FRAG
             hdr = pack_header(self.session_tag, frame_id, idx,
-                              total_frags, flags, stream_id)
+                              total_frags, flags, stream_id,
+                              frame_len=len(frame_data))
             packets.append(hdr + payload)
         return packets
 
@@ -100,22 +102,38 @@ class Reassembler:
         # frame_id -> {frag_id: payload_bytes}
         self._buffers: dict = {}
         self._completed: dict = {}
+        # frame_id -> 原始帧真实长度（用于裁剪分片补零）
+        self._frame_lens: dict = {}
+        # 已经交付过的 frame_id（防止重传分片让同一帧二次完成 + buffer 泄漏）
+        self._done: set = set()
+        self._done_order: deque = deque()
+        self._done_max = 512
 
     def feed(self, packet: bytes) -> Optional[bytes]:
-        """喂入一个包。返回完整帧 bytes（刚收齐时），否则 None。"""
+        """喂入一个包。返回完整帧 bytes（刚收齐时），否则 None。
+
+        注意：ARQ_REP 携带的是真实分片数据，必须允许进入重组器。
+        只有 ARQ_REQ（纯控制包，payload 是 client_id）才丢弃。
+        """
         try:
             hdr = unpack_header(packet)
         except HeaderError:
             return None
         if hdr.session_tag != self.session_tag:
             return None
-        if hdr.is_arq_req() or hdr.is_arq_rep():
+        if hdr.is_arq_req():
             return None
 
         frame_id = hdr.frame_id
+        if frame_id in self._done:
+            return None  # 已交付，迟到的重传片直接丢弃
+
         buf = self._buffers.setdefault(frame_id, {})
         payload = packet[HEADER_SIZE:]
         buf[hdr.frag_id] = payload
+        # 记录原始帧长（任一非零分片即可，重传片同理）
+        if hdr.frame_len > 0:
+            self._frame_lens[frame_id] = hdr.frame_len
 
         # 计数数据片（frag_id < fec_k）
         data_count = sum(1 for k in buf if isinstance(k, int) and k < self.fec_k)
@@ -158,8 +176,8 @@ class Reassembler:
             else:
                 # 数据片齐了理论上不会到这里，保险补零
                 ordered.append(b'\x00' * 16)
-        # 去掉补零尾巴：原始帧长度未知，保留全长（下游按帧边界切）
         frame = b''.join(ordered)
+        frame = self._trim(frame_id, frame)
         self._cleanup(frame_id)
         self._completed[frame_id] = frame
         return frame
@@ -172,12 +190,35 @@ class Reassembler:
         erasures = [i for i, c in enumerate(chunks) if c is None]
         recovered = self._rs.decode(chunks, erasures)
         frame = b''.join(recovered[:self.fec_k])
+        frame = self._trim(frame_id, frame)
         self._cleanup(frame_id)
         self._completed[frame_id] = frame
         return frame
 
+    def _trim(self, frame_id: int, frame: bytes) -> bytes:
+        """按头部携带的真实帧长裁剪分片补零。未知(0)时保持原样。"""
+        fl = self._frame_lens.get(frame_id, 0)
+        if fl > 0 and len(frame) > fl:
+            return frame[:fl]
+        return frame
+
     def _cleanup(self, frame_id):
         self._buffers.pop(frame_id, None)
+        self._frame_lens.pop(frame_id, None)
+        if frame_id not in self._done:
+            self._done.add(frame_id)
+            self._done_order.append(frame_id)
+            while len(self._done_order) > self._done_max:
+                self._done.discard(self._done_order.popleft())
+
+    def drop_frame(self, frame_id):
+        """上层放弃该帧（超时/重试耗尽）时调用，释放 buffer。"""
+        self._buffers.pop(frame_id, None)
+        self._frame_lens.pop(frame_id, None)
+
+    def pending_frames(self) -> dict:
+        """返回 {frame_id: 已收分片数}，供丢失检测/调试。"""
+        return {fid: len(b) for fid, b in self._buffers.items()}
 
     def has_frame(self, frame_id) -> bool:
         return frame_id in self._completed

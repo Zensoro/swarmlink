@@ -226,9 +226,11 @@ class TestARQFull:
 
         # 预填包
         for fid in range(2):
+            pkts = []
             for frid in range(14):
                 pkt = pack_header(SESSION, fid, frid, 14, 0, 0) + b"x" * 100
-                store.put(fid, [pkt])
+                pkts.append(pkt)
+            store.put(fid, pkts)
 
         retransmits = []
         agg = ARQAggregatorV2(

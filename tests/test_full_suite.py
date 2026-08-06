@@ -424,18 +424,19 @@ def test_bitmap_selective():
     for cid in [0, 3, 7]:
         req = pack_header(SESSION, fid, 5, 1, FLAG_ARQ_REQ, 0)
         agg.receive_request(req, cid)
+
+    # flush 前: 位图记录完整
+    bm = agg._bitmap
+    assert bm.recipients(fid, 5) == [0, 3, 7]
     agg.flush()
 
     assert len(sent_list) == 1
     assert sent_list[0] == [0, 3, 7]
     print(f"  ✓ 精确发送给缺片者: {sent_list[0]}")
 
-    # 验证 bitmap 状态
-    bm = agg._bitmap
-    assert bm.recipients(fid, 5) == [0, 3, 7]
-    bm.clear(fid, 5, 3)
-    assert bm.recipients(fid, 5) == [0, 7]
-    print(f"  ✓ 位图动态更新: 移除 client 3 → {bm.recipients(fid, 5)}")
+    # flush 消费 bitmap: 发送后记录已清除
+    assert bm.recipients(fid, 5) == []
+    print("  ✓ flush 后位图已消费 (防重复发送)")
 
 
 # ============================================================

@@ -24,8 +24,9 @@ from protocol.arq import ARQAggregator, ARQClient, ClientBitmap
 class TestHeader:
     def test_pack_unpack_roundtrip(self):
         hdr = pack_header(session_tag=0x12345678, frame_id=42, frag_id=7,
-                          total_frags=14, flags=0xA0, stream_id=0)
-        assert len(hdr) == HEADER_SIZE == 16
+                          total_frags=14, flags=0xA0, stream_id=0,
+                          frame_len=260)
+        assert len(hdr) == HEADER_SIZE == 20
         parsed = unpack_header(hdr)
         assert parsed.session_tag == 0x12345678
         assert parsed.frame_id == 42
@@ -33,6 +34,7 @@ class TestHeader:
         assert parsed.total_frags == 14
         assert parsed.flags == 0xA0
         assert parsed.stream_id == 0
+        assert parsed.frame_len == 260
         assert parsed.is_key_frame() is True   # 0xA0 = 1010 0000
         assert parsed.is_fec_parity() is False
 
