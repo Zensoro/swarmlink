@@ -50,7 +50,7 @@
 # 安装依赖
 pip install pynacl pytest numpy
 
-# 运行全部测试 (74 项)
+# 运行全部测试 (88 项)
 python3 -m pytest tests/ -q
 
 # 运行 v0.3 真实 UDP 三档弱网联调 (正常/15%/40%+断连/多流复用/SFU)
@@ -59,6 +59,9 @@ python3 examples/udp_e2e_test.py
 # 单机双进程 demo (两个终端, 本地回环真实 UDP socket)
 #   终端 1: python3 examples/gnd.py --frames 30
 #   终端 2: python3 examples/sky.py --frames 30 --loss 0.15
+
+# v0.5 三级拓扑演示 (中继/断连缓存/防环)
+python3 examples/relay_demo.py
 
 # 运行 v0.2 核心功能验证
 python3 tests/test_v02_core.py
@@ -78,10 +81,12 @@ swarmlink/
 │   ├── arq_full.py     # ARQ 完整链路 (SkySender/GroundReceiver/LossDetector)
 │   ├── multiplex.py    # 多流复用 (WFQ 调度) + ReliableChannel 可靠控制流
 │   ├── sfu.py          # SFU 转发器 (订阅式多码率 + bitmap 精确补片)
+│   ├── routing.py      # 一致性哈希路由 + 三级拓扑中继 (RelayNode)
+│   ├── cache.py        # stale-while-revalidate 帧缓存
 │   └── security_nacl.py # 安全层 (PyNaCl 真 AEAD, 硬依赖)
 ├── session/
 │   └── pairing.py      # 设备配对 (配对码 + keystore) + 多会话管理
-├── tests/              # 74 项测试, pytest 全绿
+├── tests/              # 88 项测试, pytest 全绿
 │   ├── test_protocol.py
 │   ├── weaknet.py           # 弱网模拟器 + 性能度量
 │   ├── test_v02_core.py
@@ -91,11 +96,13 @@ swarmlink/
 │   ├── test_pairing.py      # 设备配对 + 多会话
 │   ├── test_sfu.py          # SFU 选择性转发 (精确寻址/带宽节省)
 │   ├── test_sfu_full.py     # SFU 完整版 (订阅路由/带宽差异/动态切换)
-│   └── test_rep_replay.py   # #12: REP 豁免防重放回归
+│   ├── test_rep_replay.py   # #12: REP 豁免防重放回归
+│   └── test_routing.py      # 一致性哈希/中继/缓存 (14 项)
 ├── examples/
-│   ├── udp_e2e_test.py    # ✅ 主线联调: 真实 UDP 三档弱网 + 多流复用
-│   ├── sky.py             # (P1) 天空端: 真实 UDP 发送, 单机双进程 demo
-│   └── gnd.py             # (P1) 地面端: 真实 UDP 接收, 单机双进程 demo
+│   ├── udp_e2e_test.py    # ✅ 主线联调: 真实 UDP 三档弱网 + 多流复用/SFU
+│   ├── relay_demo.py      # v0.5 三级拓扑演示 (中继/缓存/防环)
+│   ├── sky.py             # 天空端: 真实 UDP 发送, 单机双进程 demo
+│   └── gnd.py             # 地面端: 真实 UDP 接收, 单机双进程 demo
 ├── docs/
 │   ├── VISION.md
 │   ├── ARCHITECTURE.md
@@ -183,7 +190,7 @@ swarmlink/
 | **v0.2** | **✅ 完成** | **安全层 + ARQ 完整链路 + 性能基准** |
 | **v0.3** | **✅ 完成** | **多流复用 + 可靠控制流 (ReliableChannel) + 设备配对/会话管理 + 真实 UDP 联调 + frame_len 帧长保真** |
 | **v0.4** | **✅ 完成** | **SFU 选择性转发** (bitmap 精确补片 + 订阅式多码率 LOW/HIGH, 带宽按订阅分配) |
-| v0.5 | 规划 | 一致性哈希路由 + 三级拓扑 + stale-while-revalidate |
+| **v0.5** | **🛠 进行中** | **一致性哈希路由 ✅ + 三级拓扑中继 ✅ + stale-while-revalidate 缓存 ✅** |
 | v0.6 | 规划 | RLNC 可插拔 + ns-3 集成 + Gilbert-Elliott 模型 |
 | v1.0 | 规划 | Docker 镜像 + Web 管理界面 + 完整文档站 |
 
