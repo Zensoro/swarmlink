@@ -7,6 +7,37 @@
 
 ---
 
+## [v0.6] - 2026-08-07
+
+### 新增
+- **Gilbert-Elliott 突发丢包模型**（`protocol/ge_model.py` + 接入 `tests/weaknet.py`）：
+  - 两状态马尔可夫（GOOD/BAD），突发成串丢包，对齐 802.11 干扰特征
+  - `loss_model="ge"` 参数切换，`ge_p_gb/ge_p_bg/ge_p_g/ge_p_b` 调参
+  - 理论均值/突发长度与实测对齐（±30%），修复 KNOWN_LIMITATIONS #3（部分）
+  - 接入 `udp_e2e_test.py` 场景：平均 4.8% 丢包成串，验证率仍 100%
+- **RLNC 随机线性网络编码**（`protocol/rlnc.py`）：
+  - 随机系数线性组合，任意 K 个线性无关包可解码（渐进解码）
+  - K 灵活（RS 固定 10，RLNC 任意片数），与 RS 接口兼容可切换
+  - 实测：丢 4 包恢复、少于 K 包拒绝、与 RS(10,14) 同条件对比通过
+- `tests/test_v06.py`：11 项新测试（GE 突发性/统计对齐/接入 + RLNC 闭环/恢复/灵活 K/对比）
+
+---
+
+## [v0.5] - 2026-08-07
+
+### 新增
+- **一致性哈希路由**（`protocol/routing.py` `ConsistentHash`）：
+  - 虚拟节点均匀分布（1000 key 3 节点偏差 <20%）
+  - 平滑扩容：加节点只迁移 1/N；缩容 key 守恒、均匀迁移
+- **三级拓扑中继**（`RelayNode`）：Sky→Relay→Gnd 广播转发、防环 TTL、
+  断连缓存补发（serve_stale）、下游 REQ 经中继上行
+- **stale-while-revalidate 缓存**（`protocol/cache.py`）：fresh 直出 /
+  stale 先旧后新 + 后台刷新 / 同帧防重刷防风暴
+- `examples/relay_demo.py`：三级拓扑演示（20/20 广播、断连补 5 帧、扩容平滑迁移）
+- `tests/test_routing.py`：14 项新测试
+
+---
+
 ## [v0.4] - 2026-08-07
 
 ### 新增

@@ -73,6 +73,10 @@ SCENARIOS = [
      "jitter_ms": 10, "blackout_prob": 0.0, "seed": 42},
     {"name": "地狱(40%丢包+断连)", "loss_rate": 0.40, "delay_ms": 50,
      "jitter_ms": 30, "blackout_prob": 0.001, "blackout_ms": 1000, "seed": 7},
+    # v0.6: Gilbert-Elliott 突发丢包 (平均 ~4% 丢包但成串, 对齐 802.11 突发)
+    {"name": "突发(GE 4%成串)", "loss_model": "ge",
+     "ge_p_gb": 0.02, "ge_p_bg": 0.3, "ge_p_g": 0.0, "ge_p_b": 0.6,
+     "delay_ms": 30, "jitter_ms": 10, "blackout_prob": 0.0, "seed": 42},
 ]
 
 
@@ -198,8 +202,11 @@ def run_scenario(cfg: dict, run_idx: int = 0,
               f"{'开' if encrypted else '关'}"
               f"   复用: {'开' if use_multiplex else '关'}"
               f"   SFU: {'开' if use_sfu else '关'}")
-        print(f"  丢包率: {cfg['loss_rate']*100:.0f}%  "
+        print(f"  丢包率: {cfg.get('loss_rate', 0.0)*100:.0f}%  "
               f"延迟: {cfg['delay_ms']}ms  抖动: {cfg['jitter_ms']}ms", end="")
+        if cfg.get("loss_model") == "ge":
+            print(f"  模型: GE突发(p_b={cfg['ge_p_b']}, "
+                  f"burst={1/cfg['ge_p_bg']:.0f}包)", end="")
         if cfg.get("blackout_prob", 0) > 0:
             print(f"  断连: {cfg['blackout_ms']}ms@p={cfg['blackout_prob']}",
                   end="")
@@ -812,11 +819,12 @@ def main():
               and mux_r.get("ctrl_recv", 0) > 0)
     sfu_ok = sfu_r["verify_rate"] >= 80.0
     sfu_full_ok = sfu_full["verify_rate"] == 100.0
+    ge_ok = results[3]["verify_rate"] >= 80.0
     all_pass = (ok_normal and ok_std and ok_hell and no_corrupt
-                and mux_ok and sfu_ok and sfu_full_ok)
+                and mux_ok and sfu_ok and sfu_full_ok and ge_ok)
 
     print(f"\n{'═' * 78}")
-    for r, thr in zip(results, [100.0, 80.0, 30.0]):
+    for r, thr in zip(results, [100.0, 80.0, 30.0, 80.0]):
         flag = "✓" if r["verify_rate"] >= thr else "✗"
         print(f"  {flag} {r['name']:<22s} 验证率 {r['verify_rate']:>5.1f}% "
               f"(门槛 {thr}%)  坏帧 {r['corrupted']}")

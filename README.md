@@ -50,7 +50,7 @@
 # 安装依赖
 pip install pynacl pytest numpy
 
-# 运行全部测试 (88 项)
+# 运行全部测试 (99 项)
 python3 -m pytest tests/ -q
 
 # 运行 v0.3 真实 UDP 三档弱网联调 (正常/15%/40%+断连/多流复用/SFU)
@@ -83,10 +83,12 @@ swarmlink/
 │   ├── sfu.py          # SFU 转发器 (订阅式多码率 + bitmap 精确补片)
 │   ├── routing.py      # 一致性哈希路由 + 三级拓扑中继 (RelayNode)
 │   ├── cache.py        # stale-while-revalidate 帧缓存
+│   ├── rlnc.py         # RLNC 随机线性网络编码 (可插拔 FEC)
+│   ├── ge_model.py     # Gilbert-Elliott 突发丢包模型
 │   └── security_nacl.py # 安全层 (PyNaCl 真 AEAD, 硬依赖)
 ├── session/
 │   └── pairing.py      # 设备配对 (配对码 + keystore) + 多会话管理
-├── tests/              # 88 项测试, pytest 全绿
+├── tests/              # 99 项测试, pytest 全绿
 │   ├── test_protocol.py
 │   ├── weaknet.py           # 弱网模拟器 + 性能度量
 │   ├── test_v02_core.py
@@ -190,7 +192,8 @@ swarmlink/
 | **v0.2** | **✅ 完成** | **安全层 + ARQ 完整链路 + 性能基准** |
 | **v0.3** | **✅ 完成** | **多流复用 + 可靠控制流 (ReliableChannel) + 设备配对/会话管理 + 真实 UDP 联调 + frame_len 帧长保真** |
 | **v0.4** | **✅ 完成** | **SFU 选择性转发** (bitmap 精确补片 + 订阅式多码率 LOW/HIGH, 带宽按订阅分配) |
-| **v0.5** | **🛠 进行中** | **一致性哈希路由 ✅ + 三级拓扑中继 ✅ + stale-while-revalidate 缓存 ✅** |
+| **v0.5** | **✅ 完成** | **一致性哈希路由 + 三级拓扑中继 + stale-while-revalidate 缓存** |
+| **v0.6** | **🛠 进行中** | **Gilbert-Elliott 突发丢包模型 ✅ + RLNC 可插拔 FEC ✅** (ns-3 集成 ⏳) |
 | v0.6 | 规划 | RLNC 可插拔 + ns-3 集成 + Gilbert-Elliott 模型 |
 | v1.0 | 规划 | Docker 镜像 + Web 管理界面 + 完整文档站 |
 

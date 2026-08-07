@@ -20,11 +20,13 @@
   修复 inflight 永久卡死 (REQ/REP 单向丢包时 `allow_resend`)、合并窗口 (20ms `maybe_flush`)、
   ARQ_REP 头部字段保真 (`total_frags`/`stream_id`/`ENCRYPTED`/`frame_len` 不再丢失)
 
-### 3. 弱网模拟精度有限
+### 3. ~~弱网模拟精度有限~~ ✅ v0.6 已修复 (部分)
 - **现状**: 均匀随机丢包, 非真实 Wi-Fi 突发模型
 - **影响**: 性能数据偏乐观 (真实景区干扰是 burst + 相关丢包)
-- **修复**: v0.6 加入 Gilbert-Elliott 模型 + ns-3 集成 + 真实信道踪迹回放
-- **参考**: UB-ANC / FlyNetSim 的 trace-driven emulation 方法
+- **修复 (v0.6)**: `protocol/ge_model.py` Gilbert-Elliott 两状态马尔可夫模型
+  (GOOD/BAD 态, 突发成串丢包), 已接入 WeakNetSimulator (`loss_model="ge"`)
+  和 udp_e2e 场景; 实测平均 4.8% 丢包成串, 验证率仍 100%
+- **剩余**: ns-3 集成 + 真实信道踪迹回放 (⏳ 未做)
 
 ### 4. 无国密 SM 系列支持
 - **现状**: 仅 ChaCha20-Poly1305 (国际算法)
@@ -96,6 +98,6 @@
 | #2 ARQ 闭环 | v0.3 | ✅ 已修复 (真实 UDP 联调 + 多轮重传) |
 | #8 设备认证 | v0.3 | ✅ 已修复 (pairing.py 配对码 + keystore) |
 | #12 ARQ_REP nonce | v0.4 | ✅ 已修复 (REP 豁免防重放 + 帧完成态隔离) |
-| #3 弱网模型 | v0.6 | ⏳ 待做 (ns-3 集成) |
+| #3 弱网模型 | v0.6 | ✅ 部分修复 (GE 模型已接入; ns-3 回放 ⏳) |
 | #4 国密支持 | 外部 | 需认证, 不在路线图 |
 | #5 HSM | 硬件 | 超出范围 |

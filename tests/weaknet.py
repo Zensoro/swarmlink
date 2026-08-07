@@ -29,13 +29,29 @@ class WeakNetSimulator:
     """
     def __init__(self, loss_rate: float = 0.15, delay_ms: float = 30,
                  jitter_ms: float = 10, blackout_ms: int = 2000,
-                 blackout_prob: float = 0.0, seed: int = 42):
+                 blackout_prob: float = 0.0, seed: int = 42,
+                 loss_model: str = "uniform",
+                 ge_p_gb: float = 0.02, ge_p_bg: float = 0.3,
+                 ge_p_g: float = 0.0, ge_p_b: float = 0.6):
+        """
+        loss_model: "uniform" (默认, 均匀丢包) 或 "ge" (Gilbert-Elliott 突发)
+        ge_*: GE 模型参数 (burst 长度/坏态丢包率)
+        """
         self.loss_rate = loss_rate
         self.delay_ms = delay_ms
         self.jitter_ms = jitter_ms
         self.blackout_ms = blackout_ms
         self.blackout_prob = blackout_prob
         self.rng = random.Random(seed)
+        self.loss_model = loss_model
+
+        self._ge = None
+        if loss_model == "ge":
+            # GE 目标平均丢包率对齐 loss_rate: 调 p_b 使理论均值 ≈ loss_rate
+            # P_loss = p_gb/(p_gb+p_bg) * p_b + p_gb... 简化: 用给定参数
+            from protocol.ge_model import GilbertElliott
+            self._ge = GilbertElliott(p_gb=ge_p_gb, p_bg=ge_p_bg,
+                                      p_g=ge_p_g, p_b=ge_p_b, seed=seed)
 
         self._queue = []  # 堆：(deliver_time, seq, packet)
         self._seq = 0     # 单调序号，避免 bytes 参与堆比较
@@ -63,8 +79,12 @@ class WeakNetSimulator:
                 self.blackouts_triggered += 1
                 self.packets_lost += 1
                 return
-            # 3) 普通丢包
-            if self.rng.random() < self.loss_rate:
+            # 3) 普通丢包 (均匀 或 Gilbert-Elliott 突发)
+            if self.loss_model == "ge" and self._ge is not None:
+                if self._ge.is_lost():
+                    self.packets_lost += 1
+                    return
+            elif self.rng.random() < self.loss_rate:
                 self.packets_lost += 1
                 return
             # 4) 延迟 + 抖动
