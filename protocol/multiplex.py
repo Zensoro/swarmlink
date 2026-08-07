@@ -592,10 +592,13 @@ class ReliableChannel:
         if hdr.is_arq_req():
             return None
 
-        # 解密
+        # 解密 (REP 与原包同 nonce → 豁免防重放, KNOWN_LIMITATIONS #12)
         payload = packet[HEADER_SIZE:]
         if hdr.is_encrypted() and self._decrypt is not None:
-            plain = self._decrypt(payload)
+            try:
+                plain = self._decrypt(payload, is_rep=hdr.is_arq_rep())
+            except TypeError:
+                plain = self._decrypt(payload)
             if plain is None:
                 return None
             payload = plain

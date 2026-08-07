@@ -209,6 +209,26 @@ class Decryptor:
 
     def decrypt(self, packet: bytes) -> Optional[bytes]:
         """解密一包, 返回明文或 None"""
+        return self._decrypt_impl(packet, check_replay=True)
+
+    def decrypt_for_rep(self, packet: bytes) -> Optional[bytes]:
+        """解密 ARQ_REP 包 (跳过防重放)。
+
+        ARQ_REP 是服务端对同一分片的重新投递, 与原包同 nonce 同密文。
+        低丢包/0% 丢包下原包已入防重放窗口, 若走标准 decrypt 会被判重放
+        而丢弃 → 重传全部浪费 (KNOWN_LIMITATIONS #12)。
+
+        安全权衡:
+        - AEAD 完整性验证保留 → 篡改的 REP 仍被拒绝
+        - 不把 nonce 记入已见集合 → 原始包的去重不受影响
+        - 重放旧 REP 的后果仅是把旧分片再喂一次重组器, 重组器 _done
+          集合会去重, 不会二次交付 → 无实际危害
+        """
+        return self._decrypt_impl(packet, check_replay=False)
+
+    def _decrypt_impl(self, packet: bytes,
+                      check_replay: bool) -> Optional[bytes]:
+        """解密一包, 返回明文或 None"""
         if len(packet) < SECURITY_HEADER_SIZE:
             return None
 
@@ -218,8 +238,8 @@ class Decryptor:
             ciphertext = packet[NONCE_SIZE + TAG_SIZE:]
             nonce_int = struct.unpack("!Q", nonce_bytes)[0]
 
-            # 防重放
-            if not self._replay_check(nonce_int):
+            # 防重放 (REP 豁免)
+            if check_replay and not self._replay_check(nonce_int):
                 return None
 
             sub_key = derive_sub_key(self._session_key, nonce_int)
@@ -251,7 +271,7 @@ class Decryptor:
                     return None
                 plaintext = _chacha_encrypt(sub_key, nonce_bytes, ciphertext)
 
-            if plaintext is not None:
+            if plaintext is not None and check_replay:
                 self._received.add(nonce_int)
                 self._update_window()
 
@@ -358,10 +378,15 @@ class SessionManager:
         self._packets_encrypted += 1
         return self._encryptor.encrypt(plaintext)
 
-    def decrypt_payload(self, packet: bytes) -> Optional[bytes]:
+    def decrypt_payload(self, packet: bytes,
+                        is_rep: bool = False) -> Optional[bytes]:
         if not self._session_established:
             raise RuntimeError("Session 未建立, 先完成握手")
-        result = self._decryptor.decrypt(packet)
+        # ARQ_REP 与原包同 nonce → 豁免防重放 (KNOWN_LIMITATIONS #12)
+        if is_rep:
+            result = self._decryptor.decrypt_for_rep(packet)
+        else:
+            result = self._decryptor.decrypt(packet)
         if result is not None:
             self._packets_decrypted += 1
         return result

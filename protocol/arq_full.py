@@ -295,6 +295,7 @@ class LossDetector:
         #              "first": float, "retry": {frag_id: (n, last_time)},
         #              "gaveup": bool}
         self._frames: dict = {}
+        self._completed_frames: set = set()  # 已交付帧, 后续分片不再重建状态
         self._lock = threading.Lock()
         self._stats = {
             "loss_detected": 0,
@@ -310,6 +311,8 @@ class LossDetector:
         if now is None:
             now = time.monotonic()
         with self._lock:
+            if frame_id in self._completed_frames:
+                return  # 帧已交付, 迟到的分片不重建状态
             f = self._frames.get(frame_id)
             if f is None:
                 f = {"total": total_frags, "recv": set(), "first": now,
@@ -373,10 +376,17 @@ class LossDetector:
         """帧重组完成, 清理。"""
         with self._lock:
             self._frames.pop(frame_id, None)
+            self._completed_frames.add(frame_id)
+            # 防止 completed 集合无界增长 (保留最近 1024 帧)
+            if len(self._completed_frames) > 1024:
+                self._completed_frames = set(
+                    list(self._completed_frames)[-512:])
 
     def on_rep_received(self, frame_id: int, frag_id: int):
         """收到 ARQ_REP, 标记已恢复。"""
         with self._lock:
+            if frame_id in self._completed_frames:
+                return  # 帧已交付, 迟到的 REP 无意义
             f = self._frames.get(frame_id)
             if f is not None and frag_id not in f["recv"]:
                 f["recv"].add(frag_id)
@@ -448,7 +458,13 @@ class GroundReceiver:
         """
         payload = packet[HEADER_SIZE:]
         if hdr.is_encrypted():
-            plain = self._decrypt(payload)
+            # REP 与原包同 nonce → 豁免防重放 (KNOWN_LIMITATIONS #12)
+            is_rep = hdr.is_arq_rep()
+            try:
+                plain = self._decrypt(payload, is_rep=is_rep)
+            except TypeError:
+                # 兼容旧式 decryptor_func(packet) 单参签名
+                plain = self._decrypt(payload)
             if plain is None:
                 self._stats["decrypt_fail"] += 1
                 return None

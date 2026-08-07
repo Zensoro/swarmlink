@@ -27,10 +27,11 @@
 
 ### 📡 ARQ 完整重传链路
 - **A 方案（默认）**：N 个客户端请求同分片 → 合并成 1 次重传 → 广播
-- **B 方案（预留）**：ClientBitmap 精确记录谁缺啥 → 只发给缺的人
+- **B 方案（SFU 选择性转发）**：ClientBitmap 精确记录谁缺啥 → 只发给缺的人
 - **LossDetector**：指数退避检测缺失分片，防止 ARQ 风暴
 - **PacketStore**：带 TTL 的滑动窗口存储，防内存爆
 - **ReliableChannel（控制/遥测流）**：单包 + 滑窗空洞检测 + 静默探测 + ARQ 重传，15% 丢包下实测 4/4 必达
+- **REP 豁免防重放**：重传不被防重放误杀, 0% 丢包零重传, 15% 丢包 overhead 4.3x
 
 ### 🔄 FEC 纠错
 - Reed-Solomon(10,14)：丢 4 片以内当场恢复
@@ -44,7 +45,7 @@
 # 安装依赖
 pip install pynacl pytest numpy
 
-# 运行全部测试 (64 项)
+# 运行全部测试 (68 项)
 python3 -m pytest tests/ -q
 
 # 运行 v0.3 真实 UDP 三档弱网联调 (正常/15%/40%+断连/多流复用/SFU)
@@ -74,7 +75,7 @@ swarmlink/
 │   └── security_nacl.py # 安全层 (PyNaCl 真 AEAD, 硬依赖)
 ├── session/
 │   └── pairing.py      # 设备配对 (配对码 + keystore) + 多会话管理
-├── tests/              # 64 项测试, pytest 全绿
+├── tests/              # 68 项测试, pytest 全绿
 │   ├── test_protocol.py
 │   ├── weaknet.py           # 弱网模拟器 + 性能度量
 │   ├── test_v02_core.py
@@ -82,7 +83,8 @@ swarmlink/
 │   ├── test_multiplex.py    # 多流复用 + 控制流优先
 │   ├── test_reliable_channel.py  # 可靠通道 (滑窗/空洞/静默探测)
 │   ├── test_pairing.py      # 设备配对 + 多会话
-│   └── test_sfu.py          # SFU 选择性转发 (精确寻址/带宽节省)
+│   ├── test_sfu.py          # SFU 选择性转发 (精确寻址/带宽节省)
+│   └── test_rep_replay.py   # #12: REP 豁免防重放回归
 ├── examples/
 │   ├── udp_e2e_test.py    # ✅ 主线联调: 真实 UDP 三档弱网 + 多流复用
 │   ├── sky.py             # (P1) 天空端: 真实 UDP 发送, 单机双进程 demo

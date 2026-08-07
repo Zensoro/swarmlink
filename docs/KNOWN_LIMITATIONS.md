@@ -43,13 +43,16 @@
 - **影响**: 高并发下可能成瓶颈
 - **修复**: v0.4 改为 per-thread counter + 批量处理
 
-### 12. ARQ_REP 与原包同 nonce, 防重放会误杀低丢包场景的重传
+### 12. ~~ARQ_REP 与原包同 nonce, 防重放会误杀低丢包场景的重传~~ ✅ v0.4 已修复
 - **现状**: PacketStore 重传的 REP 就是原包 (同 nonce 同密文)。低丢包/0% 丢包下
   原包已入防重放窗口 → REP 到达被判重放丢弃 (decrypt_fail), 重传成为浪费
 - **影响**: 功能正确 (帧必达), 但统计上出现"重传+解密失败"的噪音;
   LossDetector 对慢到帧 (网络抖动) 发 REQ, 即使最终 FEC 可恢复
-- **修复**: ARQ_REP 用新 nonce 重新加密 (服务端持有明文) 或 REP 豁免防重放
-- **权衡**: 高丢包场景 REP 到达时原包常已丢, 不受影响; 主线 15% 丢包 100% 通过
+- **修复 (v0.4)**:
+  * Decryptor.decrypt_for_rep 豁免防重放 (AEAD 完整性保留, 不污染 nonce 去重)
+  * LossDetector.on_packet_received/on_rep_received 跳过已交付帧 (completed set),
+    修复"帧完成后的迟到分片重建状态 → 触发误 REQ"的 bug
+- **效果**: 0% 丢包重传 109→0, 15% 丢包重传 ~700→19, overhead 11.6x→4.3x
 
 ---
 
@@ -92,7 +95,7 @@
 | #1 加密性能 | v0.3 | ✅ 已修复 (PyNaCl / libsodium C, ~500 MB/s) |
 | #2 ARQ 闭环 | v0.3 | ✅ 已修复 (真实 UDP 联调 + 多轮重传) |
 | #8 设备认证 | v0.3 | ✅ 已修复 (pairing.py 配对码 + keystore) |
-| #12 ARQ_REP nonce | v0.4 | ⏳ 待做 (REP 重新加密) |
+| #12 ARQ_REP nonce | v0.4 | ✅ 已修复 (REP 豁免防重放 + 帧完成态隔离) |
 | #3 弱网模型 | v0.6 | ⏳ 待做 (ns-3 集成) |
 | #4 国密支持 | 外部 | 需认证, 不在路线图 |
 | #5 HSM | 硬件 | 超出范围 |
