@@ -189,13 +189,15 @@ def run_scenario(cfg: dict, run_idx: int = 0,
                  n_clients: int = N_CLIENTS,
                  encrypted: bool = True,
                  use_multiplex: bool = False,
+                 use_sfu: bool = False,
                  verbose: bool = True) -> dict:
     name = cfg["name"]
     if verbose:
         print(f"\n{'─' * 62}")
         print(f"  场景: {name}   客户端: {n_clients}   加密: "
               f"{'开' if encrypted else '关'}"
-              f"   复用: {'开' if use_multiplex else '关'}")
+              f"   复用: {'开' if use_multiplex else '关'}"
+              f"   SFU: {'开' if use_sfu else '关'}")
         print(f"  丢包率: {cfg['loss_rate']*100:.0f}%  "
               f"延迟: {cfg['delay_ms']}ms  抖动: {cfg['jitter_ms']}ms", end="")
         if cfg.get("blackout_prob", 0) > 0:
@@ -264,6 +266,7 @@ def run_scenario(cfg: dict, run_idx: int = 0,
         chunk_size=CHUNK_SIZE, fec_k=FEC_K, fec_n=FEC_N,
         packet_store=store,
         arq_window_ms=20,
+        use_bitmap=use_sfu,
     )
 
     # --- 地面端 x N ---
@@ -502,7 +505,7 @@ def run_scenario(cfg: dict, run_idx: int = 0,
         "retransmits": sky_stats["retransmits"],
         "bytes_sent": sky_stats["bytes_sent"],
         "original_bytes": original_bytes,
-        "overhead_x": round(sky_stats["bytes_sent"] / original_bytes, 2),
+        "overhead_x": round(sky_link.bytes_on_wire / original_bytes, 2),
         "down_loss_pct": round(down_lost / max(1, down_in) * 100, 1),
         "up_loss_pct": round(up_lost / max(1, up_in) * 100, 1),
         "blackouts": blackouts,
@@ -518,6 +521,7 @@ def run_scenario(cfg: dict, run_idx: int = 0,
         "decrypt_ok": sum(r.stats()["rx"]["decrypt_ok"] for r in receivers),
         "decrypt_fail": sum(r.stats()["rx"]["decrypt_fail"] for r in receivers),
         "wire_bytes": sky_link.bytes_on_wire,
+        "sfu": use_sfu,
     }
 
     # 控制消息统计 (multiplex 场景)
@@ -592,6 +596,13 @@ def main():
     mux_r = run_scenario(dict(SCENARIOS[1]), run_idx=11,
                          use_multiplex=True)
 
+    # SFU 对照组: bitmap 选择性转发 (15% 丢包, 重传只发给缺片者)
+    print(f"\n{'═' * 62}")
+    print("  对照组: SFU 选择性转发 (bitmap 精确寻址)")
+    print(f"{'═' * 62}")
+    sfu_r = run_scenario(dict(SCENARIOS[1]), run_idx=12,
+                         use_sfu=True)
+
     # ---- 汇总 ----
     print(f"\n\n{'═' * 78}")
     print("  SwarmLink v0.3 三档弱网对比")
@@ -628,6 +639,15 @@ def main():
           f"{mux_r['retransmits']:>7d}"
           f"{mux_r['arq_merge_rate']:>7.1f}%"
           f"{mux_r['overhead_x']:>7.2f}x")
+    print(f"  {'标准档(SFU选择性转发)':<22s}"
+          f"{sfu_r['completion_rate']:>7.1f}%"
+          f"{sfu_r['verify_rate']:>7.1f}%"
+          f"{sfu_r['down_loss_pct']:>8.1f}%"
+          f"{sfu_r['p50_ms']:>6.0f}ms"
+          f"{sfu_r['p95_ms']:>7.0f}ms"
+          f"{sfu_r['retransmits']:>7d}"
+          f"{sfu_r['arq_merge_rate']:>7.1f}%"
+          f"{sfu_r['overhead_x']:>7.2f}x")
 
     # ---- 判定 ----
     ok_normal = results[0]["verify_rate"] == 100.0
@@ -636,7 +656,9 @@ def main():
     no_corrupt = all(r["corrupted"] == 0 for r in results)
     mux_ok = (mux_r["verify_rate"] >= 80.0
               and mux_r.get("ctrl_recv", 0) > 0)
-    all_pass = ok_normal and ok_std and ok_hell and no_corrupt and mux_ok
+    sfu_ok = sfu_r["verify_rate"] >= 80.0
+    all_pass = (ok_normal and ok_std and ok_hell and no_corrupt
+                and mux_ok and sfu_ok)
 
     print(f"\n{'═' * 78}")
     for r, thr in zip(results, [100.0, 80.0, 30.0]):
@@ -654,6 +676,7 @@ def main():
         os.path.abspath(__file__))), "tools", "v03_results.json")
     with open(out, "w", encoding="utf-8") as f:
         json.dump({"scenarios": results, "plaintext_control": plain,
+                   "multiplex": mux_r, "sfu": sfu_r,
                    "backend": info, "config": {
                        "clients": N_CLIENTS, "frames": N_FRAMES,
                        "chunk_size": CHUNK_SIZE,
