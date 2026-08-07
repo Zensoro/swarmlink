@@ -22,7 +22,7 @@
 | **Starlink RLC** | 透明/确认模式自适应切换 | 卫星轨道预测 | 图传流不确认、控制流必确认 |
 | **Signal / MTProto** | DH 密钥派生、per-message key、前向安全 | IGE 加密、云同步 | ARQ 聚合、会话管理 |
 | **TLS 1.3** | HKDF 密钥派生链、AEAD 加密 | 证书验证、SNI | 安全层核心 |
-| **NSA Suite B** | ChaCha20-Poly1305、防重放窗口 | 国密算法 | 军用级加密强度 |
+| **NSA Suite B（参考）** | ChaCha20-Poly1305、防重放窗口 | 国密算法 | 强加密算法参考, 非认证体系 |
 
 ---
 
@@ -215,7 +215,7 @@ ChaCha20 流加密 + Poly1305 MAC
 
 ### ADR-003: ChaCha20-Poly1305 (v0.2)
 - **决策**: 选 ChaCha20-Poly1305 AEAD, 不选 AES-GCM
-- **理由**: 军用级强度; 无 AES 硬件时快 3-5x; ARX 抗侧信道; WFB-ng 已验证
+- **理由**: 256bit key 强度充足; 无 AES 硬件时快 3-5x; ARX 抗侧信道; WFB-ng 已验证
 - **代价**: 纯 Python 实现仅 1.5 MB/s, 需 PyNaCl 加速
 
 ### ADR-004: X25519 + HKDF (v0.2)

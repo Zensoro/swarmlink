@@ -83,7 +83,7 @@ L1  链路层      → UDP 多播(PoC) → WFB-ng raw 802.11(生产) + 双频 MP
 
 ## 下次对话的"启动指令"（直接复制粘贴）
 
-> 我在做一个开源图传项目 **SwarmLink**，借鉴 QUIC + WebRTC SFU + MTProto 思路，做一对多并发图传系统。项目已有 v0.2 代码（协议头/分片/FEC/ARQ/加密Session/多路复用），当前卡在**端到端 UDP 联调**：加密分片(每个+24B nonce+tag)重组后帧长度对不上原始数据，疑似解密时机错误——**应该先逐分片解密再交给重组器拼帧**。请先读 `docs/HANDOFF.md` 了解全貌，再读 `docs/CHANGELOG_v02.md`、`protocol/arq_full.py`、`protocol/security_nacl.py`、`examples/udp_e2e_test.py`，定位并修复帧验证失败的问题，打通完整 ARQ 重传链路。修复后跑通正常/标准/地狱三档测试，输出对比数据。
+> 我在做一个开源图传项目 **SwarmLink**，借鉴 QUIC + WebRTC SFU + MTProto 思路，做一对多并发图传系统。项目当前状态：v0.3（多流复用 + 可靠控制通道 + 真实 UDP 联调）已完成，测试 59/59 全绿。这是历史交接文档，仅作 v0.2 及之前的背景参考；当前状态请读根目录 `README.md` 和 `docs/ARCHITECTURE.md`，代码入口是 `examples/udp_e2e_test.py`（真实 UDP 三档弱网 + 多流复用联调）。
 
 ---
 

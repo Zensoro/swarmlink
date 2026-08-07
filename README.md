@@ -10,20 +10,20 @@
 
 ## v0.2 已交付能力
 
-### 🔐 安全层（行业级标准）
-| 能力 | 实现 | 对标标准 |
+### 🔐 安全层（软件级端到端加密）
+| 能力 | 实现 | 设计参考 |
 |---|---|---|
-| 保密性 | ChaCha20-Poly1305 AEAD | TLS 1.3 / Signal |
-| 密钥协商 | X25519 DH + HKDF-SHA256 | NIST SP 800-56A |
-| 前向安全 | 每会话新 ephemeral key | Signal / Telegram Secret Chat |
-| 防重放 | nonce 滑动窗口 (1024) | NSA Suite B |
-| 防串看 | 每对设备独立 session_key | 行业级隔离 |
-| 篡改检测 | AEAD 内置 MAC | RFC 7539 |
+| 保密性 | ChaCha20-Poly1305 AEAD | TLS 1.3 常用套件 |
+| 密钥协商 | X25519 DH + HKDF-SHA256 | 通用实践 |
+| 前向安全 | 每会话新 ephemeral key | Signal / MTProto |
+| 防重放 | nonce 滑动窗口 (1024) | 通用实践 |
+| 防串看 | 每对设备独立 session_key | 按对隔离 |
+| 篡改检测 | AEAD 内置 MAC | RFC 8439 |
 
-> ⚠️ 诚实声明：
-> - 安全层统一由 **`security_nacl.py`** 提供：PyNaCl / libsodium 真 AEAD（ChaCha20-Poly1305 IETF 构造），PyNaCl 为硬依赖
-> - v0.2 的纯 Python 备用实现 `security.py`（HMAC-SHA256 替代 Poly1305，非标准 AEAD）已在 v0.3 删除，避免误用
-> - 非真军用：无 HSM/SE/TEE，无国密 SM 系列。适用于消防、边防、电力巡检等高安全需求场景。
+> ⚠️ 范围与边界：
+> - 安全层由 **`security_nacl.py`** 提供：PyNaCl / libsodium 真 AEAD（ChaCha20-Poly1305 IETF 构造），PyNaCl 为硬依赖
+> - 无 HSM/SE/TEE 硬件保护，无国密 SM 系列，不面向军用/涉密场景
+> - 适用场景：消防、边防巡逻、电力巡检等民用高安全需求
 
 ### 📡 ARQ 完整重传链路
 - **A 方案（默认）**：N 个客户端请求同分片 → 合并成 1 次重传 → 广播
@@ -44,7 +44,7 @@
 # 安装依赖
 pip install pynacl pytest numpy
 
-# 运行全部测试 (50 项)
+# 运行全部测试 (59 项)
 python3 -m pytest tests/ -q
 
 # 运行 v0.3 真实 UDP 三档弱网联调 (正常/15%/40%+断连/多流复用)
@@ -66,19 +66,26 @@ swarmlink/
 │   ├── rs_codec.py      # Reed-Solomon(10,14) GF(256)
 │   ├── arq.py          # ARQ 聚合器 A 方案 + ClientBitmap B 方案
 │   ├── arq_full.py     # ARQ 完整链路 (SkySender/GroundReceiver/LossDetector)
-│   ├── security_nacl.py # 🆕 v0.3 安全层 (PyNaCl 真 AEAD, 硬依赖)
-├── tests/              # 40 项测试, pytest 全绿
-│   ├── test_protocol.py      # v0.1 单元测试
+│   ├── multiplex.py    # 多流复用 (WFQ 调度) + ReliableChannel 可靠控制流
+│   └── security_nacl.py # 安全层 (PyNaCl 真 AEAD, 硬依赖)
+├── session/
+│   └── pairing.py      # 设备配对 (配对码 + keystore) + 多会话管理
+├── tests/              # 59 项测试, pytest 全绿
+│   ├── test_protocol.py
 │   ├── weaknet.py           # 弱网模拟器 + 性能度量
-│   ├── test_v02_core.py     # v0.2 核心验证
-│   └── test_security_arq.py
+│   ├── test_v02_core.py
+│   ├── test_security_arq.py
+│   ├── test_multiplex.py    # 多流复用 + 控制流优先
+│   ├── test_reliable_channel.py  # 可靠通道 (滑窗/空洞/静默探测)
+│   └── test_pairing.py      # 设备配对 + 多会话
 ├── examples/
 │   ├── udp_e2e_test.py    # ✅ 主线联调: 真实 UDP 三档弱网 + 多流复用
 │   └── sky_to_ground.py   # (legacy) 进程内模拟 demo, 用旧 ARQ 路径
 ├── docs/
 │   ├── VISION.md
 │   ├── ARCHITECTURE.md
-│   └── KNOWN_LIMITATIONS.md
+│   ├── KNOWN_LIMITATIONS.md
+│   └── archive/            # v0.2 及之前的历史文档
 └── README.md
 ```
 
@@ -137,7 +144,7 @@ swarmlink/
 |---|---|---|
 | v0.1 | ✅ 完成 | 协议头 + 分片/FEC + ARQ 聚合 + 弱网模拟 |
 | **v0.2** | **✅ 完成** | **安全层 + ARQ 完整链路 + 性能基准** |
-| **v0.3** | **🛠 进行中** | 多流复用 (multiplex.py) + 会话管理 (pairing.py) + 真实 UDP 联调 ✅ + 多轮 ARQ 闭环 ✅ + frame_len 帧长保真 ✅ |
+| **v0.3** | **🛠 进行中** | 多流复用 ✅ + 可靠控制流 (ReliableChannel) ✅ + 设备配对/会话管理 (pairing.py) ✅ + 真实 UDP 联调 ✅ + frame_len 帧长保真 ✅ |
 | v0.4 | 规划 | SFU 选择性转发 + Simulcast/SVC 多版本 |
 | v0.5 | 规划 | 一致性哈希路由 + 三级拓扑 + stale-while-revalidate |
 | v0.6 | 规划 | RLNC 可插拔 + ns-3 集成 + Gilbert-Elliott 模型 |

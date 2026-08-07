@@ -71,13 +71,18 @@ MAX_PEERS = 64  # 单设备最大配对设备数
 # 工具函数
 # ============================================================
 def gen_pairing_code() -> str:
-    """生成 6 位数字配对码"""
-    return f"{os.urandom(2).hex()[:6]}".zfill(6)[:6]
+    """生成 6 位数字配对码 (100000~999999)"""
+    return f"{int.from_bytes(os.urandom(4), 'big') % 900000 + 100000}"
 
-def derive_master_key(shared_secret: bytes, device_a: bytes, device_b: bytes) -> bytes:
+def derive_master_key(shared_secret: bytes, device_a: bytes, device_b: bytes,
+                      pairing_code: Optional[str] = None) -> bytes:
     """
     从 DH 共享秘密派生长期 master_key。
     双方用相同参数 → 相同结果 (确定性派生)。
+
+    pairing_code: 可选。配对码作为弱秘密混入派生 (类似 Bluetooth
+      Numeric Comparison): 只有双方码一致时才派生相同 master_key,
+      码被 MITM 篡改 → 后续加密握手必然失败。
 
     关键: info 和 salt 必须对称 (交换 A/B 结果不变)。
     """
@@ -87,6 +92,8 @@ def derive_master_key(shared_secret: bytes, device_a: bytes, device_b: bytes) ->
     prk = hmac_new(salt, shared_secret)
     # info 也用排序后的 a/b → 对称
     info = PAIRING_INFO + a + b
+    if pairing_code is not None:
+        info += b":code:" + pairing_code.encode()
     return hkdf_expand(prk, info, MASTER_KEY_SIZE)
 
 def hmac_new(key: bytes, msg: bytes) -> bytes:
@@ -220,16 +227,10 @@ class PairingManager:
             # DH → 共享秘密
             shared = self._pairing_keypair.exchange(peer_public_key)
 
-            # 如果有配对码, 验证
-            if expected_code is not None:
-                # 用共享秘密 + 配对码派生 → 双方应得相同结果
-                verify = hmac_new(shared, expected_code.encode()).hexdigest()[:8]
-                # 这里简化: 实际应做 mutual verification
-                # 配对码本身作为 "weak secret" 混入派生
-                pass
-
-            # 派生 master_key
-            master_key = derive_master_key(shared, self.device_id, peer_id)
+            # 配对码混入派生: 双方码一致才派生相同 master_key
+            # (隐式验证, 类似 Bluetooth Numeric Comparison)
+            master_key = derive_master_key(shared, self.device_id, peer_id,
+                                           pairing_code=expected_code)
 
             # 存储
             self._peers[peer_id] = master_key
@@ -262,8 +263,9 @@ class PairingManager:
                     self._reset_pairing()
                     return False
 
-            # 派生 master_key
-            master_key = derive_master_key(shared, self.device_id, peer_id)
+            # 派生 master_key (配对码混入 → 码不一致则 key 不同)
+            master_key = derive_master_key(shared, self.device_id, peer_id,
+                                           pairing_code=verify_code)
 
             # 存储
             self._peers[peer_id] = master_key
@@ -393,7 +395,7 @@ class MultiSessionManager:
         with self._lock:
             sessions_info = []
             for pid, sm in self._sessions.items():
-                s = sm.stats
+                s = sm.stats  # SessionManager.stats 是 @property (dict)
                 sessions_info.append(s)
             return {
                 "device_id": self.device_id.decode(errors='replace'),
