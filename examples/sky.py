@@ -106,6 +106,8 @@ def main():
                     help="下行丢包率 (0~1), 默认 0.15 模拟弱网")
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--no-encrypt", action="store_true")
+    ap.add_argument("--web-port", type=int, default=0,
+                    help="启动 Web 管理界面端口 (0=不启动)")
     args = ap.parse_args()
 
     # 会话: 预共享组密钥 (模拟已完成配对的设备组, 跨进程共享)
@@ -149,6 +151,19 @@ def main():
     # 发送帧 (按 fps 节奏)
     print(f"Sky 发送中: {args.frames} 帧, {args.loss*100:.0f}% 丢包, "
           f"加密 {'开' if not args.no_encrypt else '关'}")
+
+    # Web 管理界面 (v1.0)
+    if args.web_port:
+        import webui
+        webui.register_node("sky", lambda: {
+            "丢包整形": {"loss_rate": args.loss,
+                         "sent": link.sent, "dropped": link.dropped},
+            "发送统计": sender.stats(),
+            "控制流": ctrl.stats(),
+            "复用器": mux.stats(),
+        })
+        webui.start_webui(args.web_port)
+
     rng = random.Random(42)
     t0 = time.monotonic()
     for fid in range(args.frames):
@@ -190,6 +205,15 @@ def main():
     st = sender.stats()
     print(f"Sky 结束: 发送 {st['packets_sent']} 包 "
           f"(重传 {st['retransmits']})  控制消息 {ctrl.stats()['sent']} 条")
+
+    # Web 管理界面: 发送完后保持运行供查看
+    if args.web_port:
+        print("发送完成, Web 仪表盘保持运行 (Ctrl+C 退出)")
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
 
 
 if __name__ == "__main__":

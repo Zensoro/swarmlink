@@ -7,6 +7,24 @@
 
 ---
 
+## [v1.0] - 2026-08-07
+
+### 新增
+- **Docker 化**（`Dockerfile` + `docker-compose.yml` + `requirements.txt`）：
+  - 单镜像双服务 (sky/gnd), Docker Compose 一键部署
+  - UDP 端口映射 (5000/5010-5012), 容器间经 Docker 网络互连
+  - ⚠️ 当前网络环境无法拉取基础镜像, 构建验证待网络恢复
+- **Web 管理界面**（`webui.py`, 标准库零依赖）：
+  - `register_node` + `start_webui`, 任意组件注册状态源
+  - `/` HTML 仪表盘 (深色主题, 每 2s 自动刷新) + `/api/stats` JSON
+  - `examples/sky.py --web-port 8080` 一键启用, 实测实时展示
+    丢包整形/发送统计/重传/ARQ
+- **文档站**（`docs/README.md` 索引 + `docs/DEPLOYMENT.md` + `docs/API.md`）：
+  - 部署指南 (Docker/单机双进程/双机), API/模块速查, 集成示例
+- `tests/test_webui.py`：4 项新测试 (HTML/API/异常隔离/多节点)
+
+---
+
 ## [v0.6] - 2026-08-07
 
 ### 新增

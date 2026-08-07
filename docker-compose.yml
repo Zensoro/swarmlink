@@ -1,0 +1,40 @@
+# SwarmLink — Docker Compose 一键部署
+#
+# 单机双容器演示 (模拟两台机器):
+#   docker compose up -d gnd
+#   docker compose up sky
+#
+# 真实跨机部署: 改 sky/gnd 的 gnd-ip/sky-ip 为对端主机 IP
+#
+# 拓扑: sky(5000/udp) → gnd(5010/udp), 容器间经 Docker 网络互连
+
+services:
+  gnd:
+    build: .
+    container_name: swarmlink-gnd
+    command: >
+      python3 examples/gnd.py
+      --port 5010 --sky-port 5000 --sky-ip sky --frames 30 --timeout 30
+    ports:
+      - "5010:5010/udp"     # 本机可连容器 gnd
+    networks:
+      - swarmlink-net
+    restart: "no"
+
+  sky:
+    build: .
+    container_name: swarmlink-sky
+    command: >
+      python3 examples/sky.py
+      --gnd-port 5010 --gnd-ip gnd --sky-port 5000 --frames 30 --loss 0.15
+    ports:
+      - "5000:5000/udp"     # 本机可连容器 sky
+    networks:
+      - swarmlink-net
+    restart: "no"
+    depends_on:
+      - gnd
+
+networks:
+  swarmlink-net:
+    driver: bridge
