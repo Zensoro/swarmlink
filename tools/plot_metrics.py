@@ -251,7 +251,7 @@ plt.suptitle("SwarmLink — When others crash, we heal.",
              fontsize=15, fontweight="bold", color="white", y=1.01)
 
 plt.tight_layout()
-out = "/data/workspace/swarmlink/tools/swarmlink_performance.png"
+out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "swarmlink_performance.png")
 plt.savefig(out, dpi=150, bbox_inches="tight", facecolor="#0D1117")
 print(f"  ✅ 图表已保存: {out}")
 
