@@ -33,6 +33,11 @@
 - **ReliableChannel（控制/遥测流）**：单包 + 滑窗空洞检测 + 静默探测 + ARQ 重传，15% 丢包下实测 4/4 必达
 - **REP 豁免防重放**：重传不被防重放误杀, 0% 丢包零重传, 15% 丢包 overhead 4.3x
 
+### 🎬 SFU 完整版 (v0.4)
+- **订阅式多码率**：天空端每帧发布 LOW/HIGH 两档, 地面端订阅其一 → 只发对应档
+- **按订阅分配带宽**：实测 LOW 12.5% / HIGH 87.5%, 弱网端可动态降档
+- **bitmap 精确补片**：重传只发给缺片者, 节省 ≥49% 重传带宽
+
 ### 🔄 FEC 纠错
 - Reed-Solomon(10,14)：丢 4 片以内当场恢复
 - 与 ARQ 联合：FEC 优先修复，ARQ 兜底残余
@@ -45,7 +50,7 @@
 # 安装依赖
 pip install pynacl pytest numpy
 
-# 运行全部测试 (68 项)
+# 运行全部测试 (74 项)
 python3 -m pytest tests/ -q
 
 # 运行 v0.3 真实 UDP 三档弱网联调 (正常/15%/40%+断连/多流复用/SFU)
@@ -72,10 +77,11 @@ swarmlink/
 │   ├── arq.py          # ARQ 聚合器 A 方案 + ClientBitmap B 方案
 │   ├── arq_full.py     # ARQ 完整链路 (SkySender/GroundReceiver/LossDetector)
 │   ├── multiplex.py    # 多流复用 (WFQ 调度) + ReliableChannel 可靠控制流
+│   ├── sfu.py          # SFU 转发器 (订阅式多码率 + bitmap 精确补片)
 │   └── security_nacl.py # 安全层 (PyNaCl 真 AEAD, 硬依赖)
 ├── session/
 │   └── pairing.py      # 设备配对 (配对码 + keystore) + 多会话管理
-├── tests/              # 68 项测试, pytest 全绿
+├── tests/              # 74 项测试, pytest 全绿
 │   ├── test_protocol.py
 │   ├── weaknet.py           # 弱网模拟器 + 性能度量
 │   ├── test_v02_core.py
@@ -84,6 +90,7 @@ swarmlink/
 │   ├── test_reliable_channel.py  # 可靠通道 (滑窗/空洞/静默探测)
 │   ├── test_pairing.py      # 设备配对 + 多会话
 │   ├── test_sfu.py          # SFU 选择性转发 (精确寻址/带宽节省)
+│   ├── test_sfu_full.py     # SFU 完整版 (订阅路由/带宽差异/动态切换)
 │   └── test_rep_replay.py   # #12: REP 豁免防重放回归
 ├── examples/
 │   ├── udp_e2e_test.py    # ✅ 主线联调: 真实 UDP 三档弱网 + 多流复用
@@ -153,7 +160,7 @@ swarmlink/
 | v0.1 | ✅ 完成 | 协议头 + 分片/FEC + ARQ 聚合 + 弱网模拟 |
 | **v0.2** | **✅ 完成** | **安全层 + ARQ 完整链路 + 性能基准** |
 | **v0.3** | **✅ 完成** | **多流复用 + 可靠控制流 (ReliableChannel) + 设备配对/会话管理 + 真实 UDP 联调 + frame_len 帧长保真** |
-| **v0.4** | **🛠 进行中** | **SFU 选择性转发** ✅ (不同地面端缺不同片 → 只发给缺的人, 重传带宽节省 ≥49%) |
+| **v0.4** | **✅ 完成** | **SFU 选择性转发** (bitmap 精确补片 + 订阅式多码率 LOW/HIGH, 带宽按订阅分配) |
 | v0.5 | 规划 | 一致性哈希路由 + 三级拓扑 + stale-while-revalidate |
 | v0.6 | 规划 | RLNC 可插拔 + ns-3 集成 + Gilbert-Elliott 模型 |
 | v1.0 | 规划 | Docker 镜像 + Web 管理界面 + 完整文档站 |

@@ -565,6 +565,154 @@ def run_scenario(cfg: dict, run_idx: int = 0,
 
 
 # ============================================================
+# SFU 完整版场景: 订阅式多码率转发
+# ============================================================
+def run_sfu_full_scenario(cfg: dict, run_idx: int = 50,
+                          n_frames: int = N_FRAMES,
+                          n_clients: int = N_CLIENTS,
+                          encrypted: bool = True,
+                          verbose: bool = True) -> dict:
+    """天空端对每帧发布 LOW/HIGH 两个码率, 地面端各订阅一档,
+    验证按订阅定向发送 + 带宽差异 (SFU 完整版核心卖点)。"""
+    name = cfg["name"]
+    if verbose:
+        print(f"\n{'─' * 62}")
+        print(f"  场景: {name} (SFU 完整版)  客户端: {n_clients}  加密: "
+              f"{'开' if encrypted else '关'}")
+        print(f"  丢包率: {cfg['loss_rate']*100:.0f}%  "
+              f"延迟: {cfg['delay_ms']}ms")
+        print(f"{'─' * 62}")
+
+    base = run_idx * 100
+    sky_port = SKY_PORT_BASE + base
+    gnd_ports = [GND_PORT_BASE + base + i for i in range(n_clients)]
+
+    down_wns = [_wn(cfg, seed_offset=i) for i in range(n_clients)]
+    sky_link = UDPLink(sky_port, "sky")
+    for i, p in enumerate(gnd_ports):
+        sky_link.add_peer(p, down_wns[i])
+
+    gnd_links = []
+    for i, p in enumerate(gnd_ports):
+        gl = UDPLink(p, f"gnd{i}")
+        gnd_links.append(gl)
+
+    # 会话
+    from protocol.sfu import SFUForwarder, SFUReceiver, Quality
+    sky_sm = create_session_manager(b"sky-001")
+    peer_sm = create_session_manager(b"ground-000")
+    sp = sky_sm.initiate_handshake()
+    gp = peer_sm.accept_handshake(sp, b"sky-001")
+    sky_sm.finalize_handshake(gp, b"ground-000")
+    group_key = sky_sm.session_key
+
+    # 订阅表: 交替 LOW/HIGH, 保证两档都有订阅者
+    subs = [Quality.HIGH if i % 2 == 0 else Quality.LOW
+            for i in range(n_clients)]
+
+    # 天空端 SFU 转发器 (单包定向发送)
+    fwd = SFUForwarder(
+        SESSION_TAG,
+        lambda pkt, cid: sky_link.send(pkt, [cid]),
+        encrypt_func=(sky_sm.encrypt_payload if encrypted else None),
+        chunk_size=CHUNK_SIZE, fec_k=FEC_K, fec_n=FEC_N,
+    )
+    for cid, q in enumerate(subs):
+        fwd.subscribe(cid, q)
+
+    # 地面端接收器
+    receivers = []
+    for i in range(n_clients):
+        sm = create_session_manager(f"ground-{i:03d}".encode())
+        sm.adopt_session_key(group_key, b"sky-001")
+        receivers.append(SFUReceiver(
+            SESSION_TAG, i, subs[i],
+            decryptor_func=(sm.decrypt_payload if encrypted else None),
+            fec_k=FEC_K, fec_n=FEC_N,
+        ))
+
+    # 发布: LOW = 高帧前 1/4 (模拟低分辨率), HIGH = 完整帧
+    rng = random.Random(cfg.get("seed", 42))
+    original_bytes = 0
+    t0 = time.monotonic()
+    for fid in range(n_frames):
+        high = os.urandom(rng.randint(4800, 6000))
+        low = high[:len(high) // 4]
+        original_bytes += len(high) + len(low)
+        fwd.publish_frame(fid, {Quality.LOW: low, Quality.HIGH: high},
+                          key_frame=(fid % 10 == 0))
+        time.sleep(0.008)
+
+    # 收尾: 把链路中剩余包喂完 (真实 UDP 无丢包模拟时)
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        all_done = all(len(r.completed) >= n_frames for r in receivers)
+        for i in range(n_clients):
+            for pkt in gnd_links[i].drain():
+                receivers[i].feed(pkt)
+        if all_done:
+            break
+        time.sleep(0.002)
+    time.sleep(0.3)
+    for i in range(n_clients):
+        for pkt in gnd_links[i].drain():
+            receivers[i].feed(pkt)
+    elapsed = time.monotonic() - t0
+
+    # 验证: 每端收到的帧与其订阅档一致
+    verified = [0] * n_clients
+    corrupted = [0] * n_clients
+    for i in range(n_clients):
+        q = subs[i]
+        for fid, data in receivers[i].completed.items():
+            expected_len = None  # 无法逐字节比对 (随机), 按长度判断档位
+            if q == Quality.HIGH:
+                ok = 4800 <= len(data) <= 6000
+            else:
+                ok = 1200 <= len(data) <= 1500
+            if ok:
+                verified[i] += 1
+            else:
+                corrupted[i] += 1
+
+    # 带宽分配来自 fwd.stats (按质量层统计)
+    st = fwd.stats()
+    result = {
+        "name": name + " (SFU完整版)",
+        "clients": n_clients,
+        "encrypted": encrypted,
+        "time_sec": round(elapsed, 2),
+        "frames_per_client": n_frames,
+        "completion_rate": round(
+            sum(len(r.completed) for r in receivers) / (n_frames * n_clients) * 100, 1),
+        "verify_rate": round(sum(verified) / (n_frames * n_clients) * 100, 1),
+        "corrupted": sum(corrupted),
+        "per_client_verified": verified,
+        "subscriptions": {f"c{i}": int(q) for i, q in enumerate(subs)},
+        "bandwidth_low_pct": st["bandwidth_low_pct"],
+        "bandwidth_high_pct": st["bandwidth_high_pct"],
+        "bytes_sent": st["bytes_sent"],
+        "overhead_x": round(st["bytes_sent"] / max(1, original_bytes), 2),
+    }
+
+    if verbose:
+        print(f"\n    结果:")
+        print(f"      完成率:   {result['completion_rate']}%  "
+              f"验证率: {result['verify_rate']}%  坏帧 {result['corrupted']}")
+        print(f"      订阅:     {result['subscriptions']}")
+        print(f"      带宽分配: LOW {result['bandwidth_low_pct']}%  "
+              f"HIGH {result['bandwidth_high_pct']}%")
+        print(f"      总字节:   {result['bytes_sent']}  "
+              f"(原始 {original_bytes})  overhead {result['overhead_x']}x")
+
+    for gl in gnd_links:
+        gl.close()
+    sky_link.close()
+    sky_sm.destroy_session()
+    return result
+
+
+# ============================================================
 # 主入口
 # ============================================================
 def main():
@@ -602,6 +750,12 @@ def main():
     print(f"{'═' * 62}")
     sfu_r = run_scenario(dict(SCENARIOS[1]), run_idx=12,
                          use_sfu=True)
+
+    # SFU 完整版: 订阅式多码率转发 (0% 丢包, 隔离带宽差异)
+    print(f"\n{'═' * 62}")
+    print("  SFU 完整版: 订阅式多码率转发 (LOW/HIGH)")
+    print(f"{'═' * 62}")
+    sfu_full = run_sfu_full_scenario(dict(SCENARIOS[0]), run_idx=50)
 
     # ---- 汇总 ----
     print(f"\n\n{'═' * 78}")
@@ -657,14 +811,19 @@ def main():
     mux_ok = (mux_r["verify_rate"] >= 80.0
               and mux_r.get("ctrl_recv", 0) > 0)
     sfu_ok = sfu_r["verify_rate"] >= 80.0
+    sfu_full_ok = sfu_full["verify_rate"] == 100.0
     all_pass = (ok_normal and ok_std and ok_hell and no_corrupt
-                and mux_ok and sfu_ok)
+                and mux_ok and sfu_ok and sfu_full_ok)
 
     print(f"\n{'═' * 78}")
     for r, thr in zip(results, [100.0, 80.0, 30.0]):
         flag = "✓" if r["verify_rate"] >= thr else "✗"
         print(f"  {flag} {r['name']:<22s} 验证率 {r['verify_rate']:>5.1f}% "
               f"(门槛 {thr}%)  坏帧 {r['corrupted']}")
+    flag = "✓" if sfu_full_ok else "✗"
+    print(f"  {flag} SFU完整版(订阅式)        验证率 {sfu_full['verify_rate']:>5.1f}% "
+          f"带宽 LOW {sfu_full['bandwidth_low_pct']}% / "
+          f"HIGH {sfu_full['bandwidth_high_pct']}%")
     if all_pass:
         print("\n  ✅ SwarmLink v0.3 全链路联调通过 — 零坏帧")
     else:
@@ -676,7 +835,7 @@ def main():
         os.path.abspath(__file__))), "tools", "v03_results.json")
     with open(out, "w", encoding="utf-8") as f:
         json.dump({"scenarios": results, "plaintext_control": plain,
-                   "multiplex": mux_r, "sfu": sfu_r,
+                   "multiplex": mux_r, "sfu": sfu_r, "sfu_full": sfu_full,
                    "backend": info, "config": {
                        "clients": N_CLIENTS, "frames": N_FRAMES,
                        "chunk_size": CHUNK_SIZE,
