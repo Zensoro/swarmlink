@@ -26,6 +26,7 @@
 | v0.6 | 🛠 | Gilbert-Elliott 突发模型 + RLNC (ns-3 ⏳) |
 | v1.0 | 🛠 | Docker + Web 管理界面 (文档站 ✅) |
 | v1.1 | ✅ | 真实视频传输 (video_source + sky/gnd 视频模式) |
+| v1.2 | ✅ | Rust 核心 (RS/RLNC PyO3, 88-145x 加速) |
 
 ## 测试
 

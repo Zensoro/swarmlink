@@ -28,7 +28,24 @@ from .rs_codec import GF256
 
 
 class RandomLinearCode:
-    """RLNC: 随机系数线性网络编码 (GF256)。"""
+    """RLNC: 随机系数线性网络编码 (GF256)。
+
+    后端: 优先 Rust 核心 (swarmlink_core, ~10-50x 加速);
+    未安装时自动回退纯 Python + numpy。
+    """
+
+    # Rust 核心探测 (懒加载)
+    _rust = None
+
+    @classmethod
+    def _get_rust(cls):
+        if cls._rust is None:
+            try:
+                import swarmlink_core
+                cls._rust = swarmlink_core
+            except ImportError:
+                cls._rust = None
+        return cls._rust
 
     def __init__(self, seed: int = 42, extra_packets: int = 4):
         """
@@ -49,6 +66,12 @@ class RandomLinearCode:
         cs = len(data_chunks[0])
         if n_out is None:
             n_out = K + self.extra
+
+        # Rust 后端 (swarmlink_core, 加速 ~10-50x)
+        rust = self._get_rust()
+        if rust is not None:
+            return list(rust.rlnc_encode(
+                [bytes(c) for c in data_chunks], n_out - K))
 
         packets = []
         for _ in range(n_out):
@@ -76,6 +99,11 @@ class RandomLinearCode:
         cs = len(packets[0]) - 1 - K
         if len(packets) < K:
             raise ValueError(f"only {len(packets)} packets, need >= {K}")
+
+        # Rust 后端
+        rust = self._get_rust()
+        if rust is not None:
+            return list(rust.rlnc_decode([bytes(p) for p in packets]))
 
         # 高斯消元: 增广矩阵 [K x (K+cs)]
         rows = []

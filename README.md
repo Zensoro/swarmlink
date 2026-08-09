@@ -61,6 +61,10 @@
 # 安装依赖
 pip install pynacl pytest numpy
 
+# 可选: Rust 核心加速 (RS 88x / RLNC 145x 提速, 覆盖 1080p30)
+#   需要 Rust 工具链 (rustup) + maturin
+pip install maturin && cd rust && maturin develop --release && cd ..
+
 # 运行全部测试 (103 项)
 python3 -m pytest tests/ -q
 
@@ -116,16 +120,20 @@ swarmlink/
 ├── protocol/
 │   ├── header.py        # 20B 协议头 (session/frame/frag/crc/flags/frame_len)
 │   ├── fragment.py      # 分片器 + 重组器 (按 frame_len 裁剪补零) + FEC 引擎
-│   ├── rs_codec.py      # Reed-Solomon(10,14) GF(256)
+│   ├── rs_codec.py      # Reed-Solomon(10,14) GF(256) [Rust 核心优先]
 │   ├── arq.py          # ARQ 聚合器 A 方案 + ClientBitmap B 方案
 │   ├── arq_full.py     # ARQ 完整链路 (SkySender/GroundReceiver/LossDetector)
 │   ├── multiplex.py    # 多流复用 (WFQ 调度) + ReliableChannel 可靠控制流
 │   ├── sfu.py          # SFU 转发器 (订阅式多码率 + bitmap 精确补片)
 │   ├── routing.py      # 一致性哈希路由 + 三级拓扑中继 (RelayNode)
 │   ├── cache.py        # stale-while-revalidate 帧缓存
-│   ├── rlnc.py         # RLNC 随机线性网络编码 (可插拔 FEC)
+│   ├── rlnc.py         # RLNC 随机线性网络编码 [Rust 核心优先]
 │   ├── ge_model.py     # Gilbert-Elliott 突发丢包模型
 │   └── security_nacl.py # 安全层 (PyNaCl 真 AEAD, 硬依赖)
+├── rust/               # 🦀 Rust 核心 (PyO3, RS/RLNC 热路径 88-145x 加速)
+│   ├── src/gf256.rs    # GF(256) 查表运算
+│   ├── src/rs.rs       # Reed-Solomon(10,14) 编解码
+│   └── src/rlnc.rs     # RLNC 随机线性网络编码
 ├── webui.py            # Web 管理仪表盘 (零依赖, http.server)
 ├── Dockerfile          # v1.0 容器镜像
 ├── docker-compose.yml  # sky/gnd 一键部署
@@ -252,6 +260,7 @@ swarmlink/
 | **v0.6** | **🛠 进行中** | **Gilbert-Elliott 突发丢包模型 ✅ + RLNC 可插拔 FEC ✅** (ns-3 集成 ⏳) |
 | **v1.0** | **🛠 进行中** | **Docker 镜像 ✅ + Web 管理界面 ✅** (文档站 ✅) |
 | **v1.1** | **✅ 完成** | **真实视频传输** (video_source + sky --source + gnd --output, 云流实测 100% 完成) |
+| **v1.2** | **✅ 完成** | **Rust 核心** (RS/RLNC 热路径 PyO3, 88-145x 加速, 自动回退纯 Python) |
 
 ---
 

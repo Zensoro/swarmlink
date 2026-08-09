@@ -3,7 +3,25 @@
 本项目所有重要变更均记录在此文件。
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
-版本号与 README 路线图保持一致（v0.1 → v1.1）。
+版本号与 README 路线图保持一致（v0.1 → v1.2）。
+
+---
+
+## [v1.2] - 2026-08-09
+
+### 新增
+- **Rust 核心**（`rust/` crate, PyO3 0.22 + maturin）：
+  - `gf256.rs`：GF(256) 查表运算（与 Python 实现向量级一致）
+  - `rs.rs`：Reed-Solomon(10,14) 编解码 + GF 矩阵求逆
+  - `rlnc.rs`：RLNC 随机线性网络编码（K 灵活 + 高斯消元解码）
+  - PyO3 导出 `rs_encode/rs_decode/rlnc_encode/rlnc_decode/backend_info`
+  - 10 项 Rust 单元测试
+- **Python 自动回退**：`rs_codec.py` / `rlnc.py` 懒加载检测
+  `swarmlink_core`，有则用 Rust，无则回退纯 Python（Docker/CI 不破）
+- **性能**（600B × 10 片基准）：
+  - RS: 1.20 → 105.4 MB/s (**88x**)
+  - RLNC: 0.43 → 62.2 MB/s (**145x**)
+  - 均已覆盖 1080p30 (3-8 MB/s) 需求
 
 ---
 

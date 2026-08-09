@@ -1,9 +1,10 @@
 //! SwarmLink Rust 核心 — PyO3 绑定
 //!
 //! Python 侧通过 `from swarmlink_core import rs_encode, rs_decode` 使用。
-//! 性能热路径: GF(256) 查表 + RS 矩阵运算 (纯 Rust, 无 Python 循环)。
+//! 性能热路径: GF(256) 查表 + RS/RLNC 矩阵运算 (纯 Rust, 无 Python 循环)。
 
 mod gf256;
+mod rlnc;
 mod rs;
 
 use pyo3::exceptions::PyValueError;
@@ -45,13 +46,39 @@ fn rs_decode<'py>(py: Python<'py>, chunks: Vec<Option<Vec<u8>>>) -> PyResult<Vec
 /// 模块元信息 (Python 侧探测用)。
 #[pyfunction]
 fn backend_info() -> String {
-    format!("rust-core v{} (K={}, N={})", env!("CARGO_PKG_VERSION"), rs::K, rs::N)
+    format!(
+        "rust-core v{} (RS K={}, N={}; RLNC)",
+        env!("CARGO_PKG_VERSION"),
+        rs::K,
+        rs::N
+    )
+}
+
+/// RLNC 编码: K 片数据 → K+extra 个编码包 (bytes 列表)。
+#[pyfunction]
+fn rlnc_encode<'py>(py: Python<'py>, data_chunks: Vec<Vec<u8>>,
+                    extra: usize) -> PyResult<Vec<Bound<'py, PyBytes>>> {
+    if data_chunks.is_empty() {
+        return Err(PyValueError::new_err("数据片不能为空"));
+    }
+    let out = rlnc::Rlnc::encode(&data_chunks, extra);
+    Ok(out.iter().map(|d| PyBytes::new_bound(py, d)).collect())
+}
+
+/// RLNC 解码: 任意 ≥K 个编码包 → K 片数据 (bytes 列表)。
+#[pyfunction]
+fn rlnc_decode<'py>(py: Python<'py>, packets: Vec<Vec<u8>>) -> PyResult<Vec<Bound<'py, PyBytes>>> {
+    let out = rlnc::Rlnc::decode(&packets)
+        .map_err(|e| PyValueError::new_err(e))?;
+    Ok(out.iter().map(|d| PyBytes::new_bound(py, d)).collect())
 }
 
 #[pymodule]
 fn swarmlink_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(rs_encode, m)?)?;
     m.add_function(wrap_pyfunction!(rs_decode, m)?)?;
+    m.add_function(wrap_pyfunction!(rlnc_encode, m)?)?;
+    m.add_function(wrap_pyfunction!(rlnc_decode, m)?)?;
     m.add_function(wrap_pyfunction!(backend_info, m)?)?;
     Ok(())
 }
