@@ -1,5 +1,9 @@
 # SwarmLink
 
+[![Status: experimental](https://img.shields.io/badge/status-experimental-orange.svg)](https://github.com/Zensoro)
+
+> ⚠️ **Experimental** — 实验性项目，功能可能不稳定或演进中。
+
 > **One sky, many eyes.**
 >
 > 一个开源的、一对多并发图传系统。当别人在丢包里崩溃时，SwarmLink 在自愈。
