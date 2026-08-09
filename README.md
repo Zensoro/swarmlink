@@ -312,7 +312,7 @@ swarmlink/
 
 ## License
 
-GPLv3
+MIT — 最宽松的许可，可自由使用、修改、商用，无需回馈。
 
 ---
 

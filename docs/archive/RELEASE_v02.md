@@ -2,7 +2,7 @@
 
 > **Release Date**: 2026-08-06
 > **Codename**: *Iron Shield* (铁盾 — 安全层上线)
-> **License**: GPLv3
+> **License**: MIT
 
 ---
 

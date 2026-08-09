@@ -7,7 +7,7 @@
 | 文件 | 说明 |
 |---|---|
 | `README.md` | 项目门面，极客风，强调差异化不引战 |
-| `LICENSE` | GPLv3 |
+| `LICENSE` | MIT |
 | `.gitignore` | 标准 Python 忽略规则 |
 | `docs/VISION.md` | 愿景文档——"为什么存在"的软叙事 |
 | `docs/ARCHITECTURE.md` | 四层架构 + 数据流向 + ADR 决策记录 |

@@ -18,7 +18,7 @@
 | 形态 | **完整系统**（不是协议库），刷镜像/跑容器即能用 |
 | 目标用户 | **a) FPV 极客 / 开源社区**（先攒核心流量） |
 | 叙事调性 | **技术硬、叙事软**（诗意口号 + 学术级严谨） |
-| License | GPLv3 |
+| License | MIT |
 | 主演示 | **b) 地狱求生**（40% 丢包 + 2 秒断连，画面自愈） |
 | 彩蛋演示 | a) 远近分明（Simulcast 近 1080p / 远 360p） |
 | 加密定位 | 行业/准军事级（消防、边防、巡检），不吹真军用 |
@@ -34,7 +34,6 @@ L2  安全层      → ChaCha20-Poly1305 AEAD + DH 前向安全 + 防重放
 L1  链路层      → UDP 多播(PoC) → WFB-ng raw 802.11(生产) + 双频 MP-QUIC
 ```
 
-**八字诀**：拿来主义，削足适履。
 
 ---
 
@@ -143,7 +142,7 @@ swarmlink/
 │   ├── RELEASE_v02.md      # v0.2 发布说明
 │   └── KNOWN_LIMITATIONS.md # 已知限制
 ├── README.md
-└── LICENSE                 # GPLv3
+└── LICENSE                 # MIT
 ```
 
 ---
@@ -160,7 +159,7 @@ swarmlink/
 | FEC 可选 | RLNC（后期） | 可插拔，mesh 拓扑杀手锏 |
 | 多路复用 | QUIC-style 三流 | 图传/控制/遥测隔离 |
 | 测试丢包 | 均匀 → Gilbert-Elliott → 真实踪迹 | 分层可校准 |
-| License | GPLv3 | 防闭源白嫖，与 WFB-ng 同款 |
+| License | MIT | 最宽松许可 |
 
 ---
 
