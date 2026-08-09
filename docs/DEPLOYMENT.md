@@ -41,6 +41,27 @@ python3 examples/sky.py --frames 30 --loss 0.15 --web-port 8080
 - 两端需放行对应 UDP 端口 (安全组/防火墙)
 - 预共享组密钥已在 sky.py/gnd.py 内置 (demo 用途); 生产用 pairing.py 配对
 
+## 方式四: 真实视频图传
+
+把真实视频 (本地合成 / 文件 / HLS 云流) 经 SwarmLink 传过去, 接收端存成可播放文件:
+
+```bash
+# 终端 1 (地面端): 接收, 按序写入 video.h264
+python3 examples/gnd.py --frames 80 --output video.h264 --timeout 90
+
+# 终端 2 (天空端): 本地合成测试源 (零网络依赖)
+python3 examples/sky.py --frames 80 --source testsrc --fps 24 --loss 0.15
+
+#   或 HLS 云流 (真实电影内容):
+python3 examples/sky.py --frames 80 --fps 24 --loss 0.15 \
+  --source "https://demo.unified-streaming.com/k8s/features/stable/video/tears-of-steel/tears-of-steel.ism/.m3u8"
+
+# 播放
+ffplay video.h264
+```
+
+实测: 真实 UDP 双进程 + 15% 丢包 + 加密, 100% 帧完成, 解密 0 失败。
+
 ## 依赖
 
 ```bash

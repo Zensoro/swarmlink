@@ -73,6 +73,24 @@ receiver = GroundReceiver(
 # 主循环: receiver.feed(pkt); receiver.tick_loss_check()
 ```
 
+### 真实视频传输
+
+```python
+# 天空端: 从 ffmpeg 管道读真实视频帧, 逐帧发送
+from examples.video_source import VideoSource
+
+with VideoSource("testsrc", fps=24, size="640x360", frames=120) as src:
+    for fid, frame in enumerate(src):      # frame: H.264 Annex-B 访问单元
+        sender.send_frame(frame, frame_id=fid, stream_id=0, key_frame=True)
+
+# 地面端: 收齐后按序写 .h264
+with open("video.h264", "wb") as f:
+    for fid in sorted(completed):
+        f.write(completed[fid])
+```
+
+视频源: `testsrc` (零依赖) / 本地文件 / HLS URL / 摄像头 (`/dev/video0`)。
+
 ### Web 仪表盘
 
 ```python

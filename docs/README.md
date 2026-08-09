@@ -25,6 +25,7 @@
 | v0.5 | ✅ | 一致性哈希路由 + 三级拓扑 + stale-while-revalidate |
 | v0.6 | 🛠 | Gilbert-Elliott 突发模型 + RLNC (ns-3 ⏳) |
 | v1.0 | 🛠 | Docker + Web 管理界面 (文档站 ✅) |
+| v1.1 | ✅ | 真实视频传输 (video_source + sky/gnd 视频模式) |
 
 ## 测试
 

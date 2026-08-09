@@ -45,6 +45,13 @@
 ### 🔄 FEC 纠错
 - Reed-Solomon(10,14)：丢 4 片以内当场恢复
 - 与 ARQ 联合：FEC 优先修复，ARQ 兜底残余
+- **RLNC 可插拔** (v0.6)：随机线性网络编码, K 灵活, 与 RS 接口兼容
+
+### 🎞 真实视频传输 (v1.1)
+- `examples/video_source.py`：ffmpeg 管道读帧 + H.264 Annex-B 帧切分
+- `examples/video_e2e.py`：单进程全链路验证 (testsrc/云流)
+- `sky.py --source` / `gnd.py --output`：双进程真实 UDP 视频图传
+- 实测：15% 丢包 + 加密下 100% 帧完成, 输出可播放 .h264
 
 ---
 
@@ -77,6 +84,28 @@ docker compose up sky
 # 运行 v0.2 核心功能验证
 python3 tests/test_v02_core.py
 ```
+
+### 🎬 真实视频图传演示 (v1.1)
+
+真实视频经 SwarmLink 全链路传输 (分片/FEC/加密/ARQ), 接收端输出可播放文件:
+
+```bash
+# 终端 1 (地面端): 接收并保存为 .h264
+python3 examples/gnd.py --frames 80 --output video.h264 --timeout 90
+
+# 终端 2 (天空端): 真实视频源 (本地合成 / 文件 / HLS 云流)
+python3 examples/sky.py --frames 80 --source testsrc --fps 24 --loss 0.15
+#   或 HLS 云流 (真实电影内容):
+python3 examples/sky.py --frames 80 --fps 24 --loss 0.15 \
+  --source "https://demo.unified-streaming.com/k8s/features/stable/video/tears-of-steel/tears-of-steel.ism/.m3u8"
+
+# 播放收到的视频
+ffplay video.h264
+```
+
+支持视频源: `testsrc` (本地合成, 零依赖) / 本地文件 / HLS 网络流 / 摄像头。
+实测 (真实 UDP 双进程 + 15% 丢包 + 加密): testsrc 68 帧 100% 完成;
+Tears of Steel 云流 89 帧 100% 完成, 1680x750 真实电影画面, 解密 0 失败。
 
 ---
 
@@ -117,7 +146,10 @@ swarmlink/
 ├── examples/
 │   ├── udp_e2e_test.py    # ✅ 主线联调: 真实 UDP 三档弱网 + 多流复用/SFU
 │   ├── relay_demo.py      # v0.5 三级拓扑演示 (中继/缓存/防环)
-│   ├── sky.py             # 天空端: 真实 UDP 发送, 单机双进程 demo
+│   ├── video_source.py    # 🎬 v1.1 视频源读取 (ffmpeg 管道 + Annex-B 切分)
+│   ├── video_e2e.py       # 🎬 v1.1 单进程真实视频全链路验证
+│   ├── sky.py             # 天空端: 真实 UDP 发送, 支持 --source 视频源
+│   ├── gnd.py             # 地面端: 真实 UDP 接收, 支持 --output 存视频
 │   └── gnd.py             # 地面端: 真实 UDP 接收, 单机双进程 demo
 ├── docs/
 │   ├── VISION.md
@@ -219,6 +251,7 @@ swarmlink/
 | **v0.5** | **✅ 完成** | **一致性哈希路由 + 三级拓扑中继 + stale-while-revalidate 缓存** |
 | **v0.6** | **🛠 进行中** | **Gilbert-Elliott 突发丢包模型 ✅ + RLNC 可插拔 FEC ✅** (ns-3 集成 ⏳) |
 | **v1.0** | **🛠 进行中** | **Docker 镜像 ✅ + Web 管理界面 ✅** (文档站 ✅) |
+| **v1.1** | **✅ 完成** | **真实视频传输** (video_source + sky --source + gnd --output, 云流实测 100% 完成) |
 
 ---
 

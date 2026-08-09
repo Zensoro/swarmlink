@@ -3,7 +3,23 @@
 本项目所有重要变更均记录在此文件。
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
-版本号与 README 路线图保持一致（v0.1 → v0.6）。
+版本号与 README 路线图保持一致（v0.1 → v1.1）。
+
+---
+
+## [v1.1] - 2026-08-09
+
+### 新增
+- **真实视频传输**：
+  - `examples/video_source.py`：ffmpeg 管道读帧 + H.264 Annex-B 帧切分器
+    （支持 testsrc / 本地文件 / HLS 网络流 / 摄像头; SPS/PPS 与 IDR 合并）
+  - `examples/video_e2e.py`：单进程真实视频全链路验证
+  - `sky.py --source`：天空端接入真实视频源（默认 random 向后兼容）
+  - `gnd.py --output`：地面端按序写出 .h264 可播放文件
+- **实测**（真实 UDP 双进程 + 15% 丢包 + 加密）：
+  - testsrc 合成源：68 帧 100% 完成，解密 0 失败
+  - Tears of Steel HLS 云流：89 帧 100% 完成，1680x750 真实电影画面
+- **文档**：README / DEPLOYMENT / API 新增真实视频演示与集成示例
 
 ---
 
