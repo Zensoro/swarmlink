@@ -526,7 +526,7 @@ class ReliableChannel:
         self._max_retries = max_retries
         self._window = 256          # 滑窗上限
         self._lock = _t.Lock()
-        self._last_recv = 0.0       # 最后一次成功交付时间 (静默探测用)
+        self._last_recv = time.monotonic()  # 最近一次收到包的时间 (静默探测用)
         self._gaveup_seen: dict = {}
         self._stats = {
             "sent": 0, "recv": 0, "retransmits": 0,
@@ -607,6 +607,9 @@ class ReliableChannel:
             self._arq_client.ack_received(hdr.frame_id, hdr.frag_id)
             self._stats["recovered"] += 1
 
+        # 收到任意有效包 (含乱序/重传) 都刷新活动时间 → 静默探测基于最近活动
+        self._last_recv = time.monotonic()
+
         fid = hdr.frame_id
         # 已交付过的 (滑窗左侧) → 丢弃
         if fid < self._next_seq:
@@ -646,11 +649,11 @@ class ReliableChannel:
                         continue
                     self._maybe_req(fid, now)
 
-            # 2) 静默探测: 收到消息后空闲超过 RTO → 探测下一个序号
+            # 2) 静默探测: 最近活动后空闲超过 RTO → 探测下一个序号
             #    单包事件流没有"流终止信号", 最后一条丢失时接收端无从知道。
             #    空闲即探测: 服务端 store 有货 → 重传; 没货 → 退避后放弃。
-            if (self._last_recv > 0
-                    and (now - self._last_recv) * 1000 >= self._rto_ms):
+            #    _last_recv 初始化为创建时刻 → 首条丢失也能触发探测 (不再要求 >0)
+            if (now - self._last_recv) * 1000 >= self._rto_ms:
                 self._maybe_req(self._next_seq, now)
 
     def _maybe_req(self, fid: int, now: float):

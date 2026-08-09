@@ -188,3 +188,50 @@ def test_stats_reported():
     assert len(got) == 2
     assert sky_chan.stats()["sent"] == 2
     assert gnd_chan.stats()["recv"] == 2
+
+
+def test_first_message_lost_still_recovered():
+    """静默启动缺陷回归: 首条消息即丢失 (down 全丢) → 接收端仍发 REQ。
+
+    修复前: 静默探测要求 _last_recv > 0, 首条丢失时 _last_recv 从未设置,
+    永不发 REQ → 消息永久丢失。修复后: _last_recv 初始化为创建时刻,
+    空闲超 RTO 即探测缺失的 seq → REQ 必须发出。
+    """
+    sky_chan = ReliableChannel(SESSION, StreamType.CONTROL)
+    gnd_chan = ReliableChannel(SESSION, StreamType.CONTROL)
+
+    class DropAll:
+        def __init__(self):
+            self.sent = 0
+        def send(self, pkt):
+            self.sent += 1  # 全丢
+        def drain(self):
+            return []
+
+    class Up:
+        def __init__(self):
+            self.queue = []
+        def send(self, pkt):
+            self.queue.append(pkt)
+        def drain(self):
+            out, self.queue = self.queue, []
+            return out
+
+    down = DropAll()
+    up = Up()
+    sky_chan.set_retransmit_func(down.send)
+    gnd_chan._arq_client._send = up.send
+
+    sky_chan.send_message(b"only-one")
+
+    # 泵 2 秒 (超过 RTO 40ms 很多倍)
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < 2.0:
+        for pkt in up.drain():
+            sky_chan.handle_arq_request(pkt, client_id=0)
+        sky_chan.tick_arq()
+        gnd_chan.tick_loss_check()
+        time.sleep(0.005)
+
+    assert gnd_chan.stats()["reqs_sent"] > 0, \
+        "首条丢失也应发 REQ (静默探测不得因 _last_recv==0 而沉默)"
