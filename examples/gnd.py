@@ -96,6 +96,8 @@ def main():
                     help="期望收到的帧数 (用于完成判定)")
     ap.add_argument("--timeout", type=float, default=15.0)
     ap.add_argument("--no-encrypt", action="store_true")
+    ap.add_argument("--output", default=None,
+                    help="把收到的帧按序写入 .h264 文件 (真实视频验证用)")
     args = ap.parse_args()
 
     # 会话: 预共享组密钥 (模拟已完成配对的设备组, 跨进程共享)
@@ -204,6 +206,15 @@ def main():
         vals = sorted(latencies.values())
         print(f"  延迟: p50 {vals[len(vals)//2]:.0f}ms  "
               f"p95 {vals[int(len(vals)*0.95)]:.0f}ms")
+
+    # 真实视频验证: 按序写 .h264 文件
+    if args.output and completed:
+        with open(args.output, "wb") as f:
+            for fid in sorted(completed.keys()):
+                f.write(completed[fid])
+        print(f"  视频输出: {args.output} "
+              f"({os.path.getsize(args.output)} bytes, "
+              f"{len(completed)} 帧)")
 
 
 if __name__ == "__main__":

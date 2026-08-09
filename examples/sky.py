@@ -108,6 +108,9 @@ def main():
     ap.add_argument("--no-encrypt", action="store_true")
     ap.add_argument("--web-port", type=int, default=0,
                     help="启动 Web 管理界面端口 (0=不启动)")
+    ap.add_argument("--source", default="random",
+                    help="视频源: random (随机帧, 默认) | testsrc | 文件 | HLS URL")
+    ap.add_argument("--size", default="640x360", help="视频分辨率")
     args = ap.parse_args()
 
     # 会话: 预共享组密钥 (模拟已完成配对的设备组, 跨进程共享)
@@ -150,7 +153,8 @@ def main():
 
     # 发送帧 (按 fps 节奏)
     print(f"Sky 发送中: {args.frames} 帧, {args.loss*100:.0f}% 丢包, "
-          f"加密 {'开' if not args.no_encrypt else '关'}")
+          f"加密 {'开' if not args.no_encrypt else '关'}, "
+          f"视频源: {args.source}")
 
     # Web 管理界面 (v1.0)
     if args.web_port:
@@ -164,15 +168,49 @@ def main():
         })
         webui.start_webui(args.web_port)
 
-    rng = random.Random(42)
+    # 帧源: 随机帧 (默认) 或真实视频 (VideoSource)
+    from examples.video_source import VideoSource
     t0 = time.monotonic()
-    for fid in range(args.frames):
-        data = os.urandom(rng.randint(4800, 6000))
-        sender.send_frame(data, frame_id=fid, stream_id=0,
-                          key_frame=(fid % 10 == 0))
-        if fid % 7 == 0:
-            ctrl.send_message(f"CMD:{fid}:ALT=50m".encode())
-        time.sleep(1.0 / args.fps)
+    rng = random.Random(42)
+
+    if args.source == "random":
+        for fid in range(args.frames):
+            data = os.urandom(rng.randint(4800, 6000))
+            sender.send_frame(data, frame_id=fid, stream_id=0,
+                              key_frame=(fid % 10 == 0))
+            if fid % 7 == 0:
+                ctrl.send_message(f"CMD:{fid}:ALT=50m".encode())
+            time.sleep(1.0 / args.fps)
+    else:
+        # 真实视频: 边读边发, 每帧都发 ARQ 处理
+        with VideoSource(args.source, fps=args.fps, size=args.size,
+                         frames=args.frames) as src:
+            fid = 0
+            for frame in src:
+                sender.send_frame(frame, frame_id=fid, stream_id=0,
+                                  key_frame=True)
+                if fid % 7 == 0:
+                    ctrl.send_message(f"CMD:{fid}:ALT=50m".encode())
+                fid += 1
+                # 处理上行 REQ
+                for pkt in link.drain():
+                    try:
+                        hdr = unpack_header(pkt)
+                    except HeaderError:
+                        continue
+                    if not hdr.is_arq_req():
+                        continue
+                    cid = 0
+                    if len(pkt) >= HEADER_SIZE + 4:
+                        cid = struct.unpack(
+                            "!I", pkt[HEADER_SIZE:HEADER_SIZE + 4])[0]
+                    if hdr.stream_id == StreamType.CONTROL:
+                        ctrl.handle_arq_request(pkt, cid)
+                    else:
+                        sender.handle_arq_request(pkt, cid)
+                sender.tick_arq()
+                ctrl.tick_arq()
+                time.sleep(1.0 / args.fps)
 
     print("发送完成, 等待 ARQ 收尾...")
     deadline = time.monotonic() + 6.0
