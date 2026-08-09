@@ -46,9 +46,30 @@ class GF256:
 
 
 class ReedSolomon:
-    """RS(K=10, N=14) 系统码。data[0..K-1] 原样输出，后 N-K 片为冗余。"""
+    """RS(K=10, N=14) 系统码。data[0..K-1] 原样输出，后 N-K 片为冗余。
+
+    后端: 优先 Rust 核心 (swarmlink_core, ~10-50x 加速);
+    未安装时自动回退纯 Python + numpy 实现。
+    """
     K = 10
     N = 14
+
+    # Rust 核心探测 (懒加载)
+    _rust = None
+
+    @classmethod
+    def _get_rust(cls):
+        if cls._rust is None:
+            try:
+                import swarmlink_core
+                cls._rust = swarmlink_core
+            except ImportError:
+                cls._rust = False
+        return cls._rust
+
+    @property
+    def backend(self) -> str:
+        return "rust" if self._get_rust() else "python"
 
     def __init__(self):
         self.gf = GF256()
@@ -66,6 +87,9 @@ class ReedSolomon:
 
     def encode(self, data_chunks: list) -> list:
         """data_chunks: 恰好 K 片等长 → 返回 N 片（前 K 是数据原样，后 R 是冗余）。"""
+        rust = self._get_rust()
+        if rust:
+            return list(rust.rs_encode([bytes(c) for c in data_chunks]))
         assert len(data_chunks) == self.K
         cs = len(data_chunks[0])
         # 矩阵乘：对每个字节位置 b，enc[b] = G @ data_bytes
@@ -86,6 +110,11 @@ class ReedSolomon:
         erasures: 已知缺失下标。
         返回修复后的前 K 片数据（等长列表）。
         """
+        rust = self._get_rust()
+        if rust:
+            slots = [None if (c is None or len(c) == 0) else bytes(c)
+                     for c in chunks]
+            return list(rust.rs_decode(slots))
         R = self.N - self.K
         cs = next((len(c) for c in chunks if c), 0)
         # 找出 K 个幸存片的下标

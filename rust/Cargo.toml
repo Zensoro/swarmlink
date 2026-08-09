@@ -1,0 +1,16 @@
+[package]
+name = "swarmlink-core"
+version = "0.1.0"
+edition = "2021"
+description = "SwarmLink Rust 核心: GF(256) + Reed-Solomon 编解码热路径"
+
+[lib]
+name = "swarmlink_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+
+[profile.release]
+opt-level = 3
+lto = true

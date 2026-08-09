@@ -29,6 +29,10 @@ build/
 dist/
 *.egg-info/
 
+# Rust
+rust/target/
+*.so
+
 # Tools output
 *.png
 !tools/*.png
