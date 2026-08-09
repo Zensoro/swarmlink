@@ -26,7 +26,7 @@
 
 > ⚠️ 范围与边界：
 > - 安全层由 **`security_nacl.py`** 提供：PyNaCl / libsodium 真 AEAD（ChaCha20-Poly1305 IETF 构造），PyNaCl 为硬依赖
-> - 无 HSM/SE/TEE 硬件保护，无国密 SM 系列，不面向军用/涉密场景
+> - 无 HSM/SE/TEE 硬件保护，无国密 SM 系列
 > - 适用场景：消防、边防巡逻、电力巡检等民用高安全需求
 
 ### 📡 ARQ 完整重传链路
@@ -88,7 +88,7 @@ SwarmLink 定位: **一对多、弱网韧、低延迟、可扩展** 的传输层
 
 > ⚠️ 边界: SwarmLink 是**传输层** (分片/FEC/ARQ/加密/路由),
 > 不含视频编码/渲染, 不含射频物理层 (工作在 UDP 之上)。
-> 军事/涉密场景需额外硬件与合规 (见 KNOWN_LIMITATIONS)。
+> 合规要求高的场景需部署方自行评估 (见 KNOWN_LIMITATIONS)。
 
 ---
 
